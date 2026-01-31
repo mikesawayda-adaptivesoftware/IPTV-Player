@@ -1,0 +1,59 @@
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+
+# Android
+.gradle/
+local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# iOS/macOS
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.pbxuser
+DerivedData/
+build/
+Archives/
+Pods/
+.symlinks/
+profile
+xcuserdata/
+ios/Flutter/.last_build_id
+.generated/
+
+# Windows
+build/
+bin/
+obj/
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# Angular (as requested)
+node_modules/
+dist/
+.angular/
+.cache/
+.editorconfig
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+.npm/
+
+# General OS
+.DS_Store
+Thumbs.db
+desktop.ini

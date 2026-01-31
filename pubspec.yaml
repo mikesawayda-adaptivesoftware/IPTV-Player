@@ -1,0 +1,68 @@
+name: iptv_player
+description: A cross-platform IPTV player supporting M3U and Xtream Codes API
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # State Management
+  flutter_riverpod: ^2.4.9
+  riverpod_annotation: ^2.3.3
+  
+  # Video Playback - Native platforms
+  media_kit: ^1.1.10+1
+  media_kit_video: ^1.2.4
+  media_kit_libs_video: ^1.0.4
+  media_kit_libs_macos_video: ^1.1.4
+  media_kit_libs_windows_video: ^1.0.9
+  media_kit_libs_linux: ^1.1.3
+  media_kit_libs_android_video: ^1.3.6
+  
+  # Video Playback - Web support
+  video_player: ^2.8.2
+  video_player_web: ^2.3.0
+  
+  # Local Storage
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
+  
+  # Networking
+  dio: ^5.4.0
+  
+  # XML Parsing (for EPG)
+  xml: ^6.5.0
+  
+  # File Handling
+  file_picker: ^6.1.1
+  path_provider: ^2.1.2
+  path: ^1.8.3
+  
+  # UI Components
+  cached_network_image: ^3.3.1
+  shimmer: ^3.0.0
+  
+  # Utilities
+  intl: ^0.19.0
+  collection: ^1.18.0
+  equatable: ^2.0.5
+  uuid: ^4.3.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+  build_runner: ^2.4.8
+  hive_generator: ^2.0.1
+  riverpod_generator: ^2.3.9
+
+flutter:
+  uses-material-design: true
+  
+  assets:
+    - assets/images/
+
