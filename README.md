@@ -54,7 +54,7 @@ A modern, high-performance cross-platform IPTV player built with Flutter. Suppor
 
 3. **Generate required code:**
    ```bash
-   flutter pub run build_runner build --delete-conflicting-outputs
+   dart run build_runner build --delete-conflicting-outputs
    ```
 
 4. **Run the app:**

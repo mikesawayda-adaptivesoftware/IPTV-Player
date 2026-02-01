@@ -99,23 +99,45 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
   Future<void> _initializePlayer() async {
     final bufferMode = ref.read(bufferModeProvider);
     
-    // Create player with buffer configuration
-    _player = Player(
-      configuration: PlayerConfiguration(
-        bufferSize: 64 * 1024 * 1024, // 64MB buffer
-      ),
-    );
-    
-    _controller = VideoController(_player);
+    try {
+      // Create player with buffer configuration
+      // Note: Using software rendering to avoid GPU texture crashes on Linux
+      _player = Player(
+        configuration: PlayerConfiguration(
+          bufferSize: 64 * 1024 * 1024, // 64MB buffer
+          logLevel: MPVLogLevel.v, // Verbose logging for debugging
+        ),
+      );
+      
+      print('Player created successfully');
+      
+      // Create VideoController with software rendering
+      _controller = VideoController(
+        _player,
+        configuration: const VideoControllerConfiguration(
+          enableHardwareAcceleration: false, // Force software rendering
+        ),
+      );
+      print('VideoController created with software rendering');
 
-    // Configure mpv properties for buffering
-    await _configureBuffering(bufferMode);
+      // Configure mpv properties for buffering and video output
+      await _configureBuffering(bufferMode);
 
-    // Set up stream listeners
-    _setupStreamListeners();
+      // Set up stream listeners
+      _setupStreamListeners();
 
-    // Open the stream
-    await _openStream();
+      // Open the stream
+      await _openStream();
+    } catch (e, stackTrace) {
+      print('Error initializing player: $e');
+      print('Stack trace: $stackTrace');
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Failed to initialize player: $e';
+          _isLoading = false;
+        });
+      }
+    }
   }
 
   Future<void> _configureBuffering(BufferMode mode) async {
@@ -327,9 +349,13 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
     });
 
     try {
+      print('Opening stream: ${_currentChannel.streamUrl}');
       await _player.open(Media(_currentChannel.streamUrl));
+      print('Stream opened successfully');
       _startHideTimer();
-    } catch (e) {
+    } catch (e, stackTrace) {
+      print('Error opening stream: $e');
+      print('Stack trace: $stackTrace');
       _handlePlaybackError(e.toString());
     }
   }

@@ -11,10 +11,20 @@ import 'data/models/playlist_source.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
+  // Set up error handlers
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.presentError(details);
+    print('Flutter Error: ${details.exception}');
+    print('Stack trace: ${details.stack}');
+  };
+  
   // Initialize MediaKit
+  print('Initializing MediaKit...');
   MediaKit.ensureInitialized();
+  print('MediaKit initialized');
   
   // Initialize Hive
+  print('Initializing Hive...');
   await Hive.initFlutter();
   
   // Register Hive adapters
@@ -30,6 +40,7 @@ void main() async {
   await Hive.openBox<VODItem>('history_vod');
   await Hive.openBox<PlaylistSource>('playlist_sources');
   await Hive.openBox('settings');
+  print('Hive initialized');
   
   runApp(
     const ProviderScope(

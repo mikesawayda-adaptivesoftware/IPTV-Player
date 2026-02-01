@@ -48,7 +48,12 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
 
   Future<void> _initializePlayer() async {
     _player = Player();
-    _controller = VideoController(_player);
+    _controller = VideoController(
+      _player,
+      configuration: const VideoControllerConfiguration(
+        enableHardwareAcceleration: false, // Force software rendering
+      ),
+    );
 
     // Listen to player state changes
     _player.stream.playing.listen((playing) {
