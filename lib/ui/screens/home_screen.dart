@@ -57,9 +57,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               // Navigation Rail for desktop
               if (isDesktop) _buildNavigationRail(),
               
-              // Main content
+              // Main content. SafeArea keeps tab headers clear of the phone's
+              // status bar and gesture insets - without it the header (and its
+              // refresh button) render under the status bar and can't be
+              // tapped. No-op on desktop, which has no system insets. The
+              // full-screen player routes are pushed separately and stay
+              // edge-to-edge.
               Expanded(
-                child: _screens[_selectedIndex],
+                child: SafeArea(
+                  child: _screens[_selectedIndex],
+                ),
               ),
             ],
           ),
