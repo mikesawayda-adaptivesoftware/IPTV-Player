@@ -6,24 +6,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../../core/player/stream_tuning.dart';
+import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
-import '../../core/utils/extensions.dart';
 import '../../data/models/channel.dart';
 import '../../data/services/storage_service.dart';
 import '../../providers/playlist_provider.dart';
 
-/// Buffer mode settings
-enum BufferMode {
-  low(2, 'Low Latency', '2 seconds - minimal delay, may buffer more'),
-  normal(10, 'Normal', '10 seconds - balanced'),
-  high(30, 'High Reliability', '30 seconds - best for unstable connections');
-
-  final int seconds;
-  final String label;
-  final String description;
-
-  const BufferMode(this.seconds, this.label, this.description);
-}
+// BufferMode moved to core/player/stream_tuning.dart so the tuning layer can
+// use it without depending on the UI. Re-exported here because the settings
+// screen imports it from this file.
+export '../../core/player/stream_tuning.dart' show BufferMode;
 
 /// Provider for buffer settings
 final bufferModeProvider = StateProvider<BufferMode>((ref) {
@@ -56,80 +49,107 @@ class EnhancedVideoPlayer extends ConsumerStatefulWidget {
 }
 
 class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
-  late Player _player;
-  late VideoController _controller;
+  // Nullable, and rebuilt from scratch by the watchdog's recreate step - a
+  // wedged libmpv instance cannot be recovered any other way.
+  Player? _player;
+  VideoController? _controller;
+  final List<StreamSubscription> _subscriptions = [];
+
+  late StreamWatchdog _watchdog;
+  WatchdogStatus _watchdogStatus =
+      const WatchdogStatus(phase: WatchdogPhase.healthy, message: '');
+
   late Channel _currentChannel;
-  
+
+  /// Mutable because the watchdog may fall back to the provider's other stream
+  /// format when the original will not play.
+  late String _streamUrl;
+
   bool _isFullscreen = false;
   bool _showControls = true;
   bool _isLoading = true;
   bool _isBuffering = false;
   String? _errorMessage;
   Timer? _hideTimer;
-  Timer? _stallDetectionTimer;
-  Timer? _freezeDetectionTimer;
-  
-  // Buffer health tracking
-  double _bufferHealth = 0.0; // 0.0 to 1.0
-  Duration _lastPosition = Duration.zero;
-  int _stallCount = 0;
-  int _reconnectAttempts = 0;
-  static const int _maxReconnectAttempts = 3;
-  bool _isReconnecting = false;
-  
-  // Frame-based freeze detection
-  int _frozenFrameCount = 0;
-  static const int _freezeThreshold = 3; // Trigger after 3 checks (~3 seconds)
-  bool _streamUnstable = false;
-  
+
+  double _bufferHealth = 0.0;
+
   final FocusNode _focusNode = FocusNode();
 
   @override
   void initState() {
     super.initState();
     _currentChannel = widget.channel;
-    _initializePlayer();
-    
-    // Mark channel as watched
+    _streamUrl = widget.channel.streamUrl;
+
+    // Go immersive the moment the player opens: hide the phone's status bar and
+    // navigation buttons so video is truly full-screen. Restored in dispose.
+    // No-op on desktop. immersiveSticky keeps the bars hidden but lets a user
+    // swipe from an edge to reveal them briefly.
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+
+    _watchdog = StreamWatchdog(
+      playerRef: () => _player,
+      urlRef: () => _streamUrl,
+      enabled: () => ref.read(autoReconnectProvider),
+      isLive: widget.isLive,
+      onRecreate: _recreatePlayer,
+      onOpen: _openUrl,
+      onUrlChanged: (url) => _streamUrl = url,
+      onStatus: _onWatchdogStatus,
+    );
+
+    _bootstrap();
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(channelStateProvider.notifier).markAsWatched(_currentChannel);
     });
   }
 
-  Future<void> _initializePlayer() async {
-    final bufferMode = ref.read(bufferModeProvider);
-    
+  Future<void> _bootstrap() async {
+    await _createPlayer();
+    await _openUrl(_streamUrl);
+    _watchdog.start();
+    _startHideTimer();
+  }
+
+  // ==========================================================================
+  // Player lifecycle
+  // ==========================================================================
+
+  Future<void> _createPlayer() async {
     try {
-      // Create player with buffer configuration
-      // Note: Using software rendering to avoid GPU texture crashes on Linux
-      _player = Player(
-        configuration: PlayerConfiguration(
-          bufferSize: 64 * 1024 * 1024, // 64MB buffer
-          logLevel: MPVLogLevel.v, // Verbose logging for debugging
+      final player = Player(
+        configuration: const PlayerConfiguration(
+          bufferSize: 64 * 1024 * 1024,
         ),
       );
-      
-      print('Player created successfully');
-      
-      // Create VideoController with software rendering
-      _controller = VideoController(
-        _player,
+
+      final controller = VideoController(
+        player,
         configuration: const VideoControllerConfiguration(
-          enableHardwareAcceleration: false, // Force software rendering
+          // Software rendering - works around GPU texture crashes seen on Linux.
+          enableHardwareAcceleration: false,
         ),
       );
-      print('VideoController created with software rendering');
 
-      // Configure mpv properties for buffering and video output
-      await _configureBuffering(bufferMode);
+      // Publish to the widget tree FIRST. The VideoController only finishes
+      // initialising once a Video widget mounts, and setProperty waits on that
+      // - tuning before the first build deadlocks until every property times
+      // out, which made each recovery ~30s slower.
+      _player = player;
+      _controller = controller;
+      _attachListeners(player);
+      if (mounted) setState(() {});
 
-      // Set up stream listeners
-      _setupStreamListeners();
-
-      // Open the stream
-      await _openStream();
+      // Still before open(): the FFmpeg demuxer options are read at open time.
+      await StreamTuning.apply(
+        player,
+        mode: ref.read(bufferModeProvider),
+        isLive: widget.isLive,
+      );
     } catch (e, stackTrace) {
-      print('Error initializing player: $e');
+      print('Error creating player: $e');
       print('Stack trace: $stackTrace');
       if (mounted) {
         setState(() {
@@ -140,158 +160,100 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
     }
   }
 
-  Future<void> _configureBuffering(BufferMode mode) async {
-    // Buffer configuration is handled through PlayerConfiguration bufferSize
-    // and the auto-recovery system handles stream issues at the application level.
-    // 
-    // The PlayerConfiguration bufferSize (64MB) provides substantial buffering,
-    // while our watchdog and stall detection handle recovery automatically.
-    print('Buffer mode set to: ${mode.label} (${mode.seconds}s target)');
-  }
+  void _attachListeners(Player player) {
+    void listen<T>(Stream<T> stream, void Function(T) onData) {
+      _subscriptions.add(stream.listen(onData));
+    }
 
-  void _setupStreamListeners() {
-    _player.stream.playing.listen((playing) {
-      if (mounted) {
-        setState(() {});
-        if (playing) {
-          _startFreezeDetection();
-        } else {
-          _stopFreezeDetection();
-        }
-      }
+    listen(player.stream.playing, (_) {
+      if (mounted) setState(() {});
     });
 
-    _player.stream.buffering.listen((buffering) {
-      if (mounted) {
-        setState(() {
-          _isBuffering = buffering;
-          _isLoading = buffering && _lastPosition == Duration.zero;
-        });
-        
-        // Track buffering for stall detection
-        if (buffering) {
-          _onBufferingStarted();
-        } else {
-          _onBufferingStopped();
-        }
-      }
+    listen(player.stream.buffering, (buffering) {
+      if (!mounted) return;
+      setState(() {
+        _isBuffering = buffering;
+        _isLoading = buffering && player.state.position == Duration.zero;
+      });
     });
 
-    _player.stream.position.listen((position) {
-      if (mounted) {
-        // Check for frozen frames
-        if (_player.state.playing && !_isBuffering && !_isLoading) {
-          if (position == _lastPosition && position != Duration.zero) {
-            _frozenFrameCount++;
-            if (_frozenFrameCount >= _freezeThreshold && !_isReconnecting) {
-              print('Freeze detected: Position stuck at ${position.inSeconds}s for $_frozenFrameCount checks');
-              _handleFreeze();
-            }
-          } else {
-            // Position changed, reset freeze counter
-            if (_frozenFrameCount > 0) {
-              print('Stream recovered, position advancing');
-            }
-            _frozenFrameCount = 0;
-            _streamUnstable = false;
-          }
-        }
-        _lastPosition = position;
-        _updateBufferHealth();
-      }
-    });
+    listen(player.stream.buffer, (_) => _updateBufferHealth());
 
-    _player.stream.buffer.listen((buffer) {
-      if (mounted) {
-        _updateBufferHealth();
-      }
-    });
-
-    _player.stream.error.listen((error) {
-      if (mounted && error.isNotEmpty) {
-        _handlePlaybackError(error);
-      }
+    listen(player.stream.error, (error) {
+      if (!mounted || error.isEmpty) return;
+      _handlePlaybackError(error);
     });
   }
 
-  void _updateBufferHealth() {
-    final buffer = _player.state.buffer;
-    final bufferMode = ref.read(bufferModeProvider);
-    final targetBuffer = Duration(seconds: bufferMode.seconds);
-    
-    if (targetBuffer.inSeconds > 0) {
-      final health = (buffer.inSeconds / targetBuffer.inSeconds).clamp(0.0, 1.0);
-      if (mounted) {
-        setState(() => _bufferHealth = health);
-      }
+  Future<void> _cancelSubscriptions() async {
+    for (final subscription in _subscriptions) {
+      await subscription.cancel();
+    }
+    _subscriptions.clear();
+  }
+
+  /// Tears the player down completely and builds a new one. This is the
+  /// recovery step that actually clears a wedged libmpv/FFmpeg state, which no
+  /// amount of re-opening the same stream will fix.
+  Future<void> _recreatePlayer(String url) async {
+    final old = _player;
+
+    await _cancelSubscriptions();
+
+    // Drop the Video widget before disposing, so it never holds a controller
+    // whose player is going away.
+    _player = null;
+    _controller = null;
+    if (mounted) setState(() => _isLoading = true);
+    await Future.delayed(const Duration(milliseconds: 100));
+
+    try {
+      await old?.dispose();
+    } catch (e) {
+      print('Error disposing player during recreate: $e');
+    }
+
+    await _createPlayer();
+    await _openUrl(url);
+  }
+
+  Future<void> _openUrl(String url) async {
+    final player = _player;
+    if (player == null) return;
+
+    if (mounted) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+    }
+
+    try {
+      print('Opening stream: ${_currentChannel.name}');
+      await player.open(Media(url));
+      _watchdog.noteStreamOpened();
+    } catch (e) {
+      // Exception text from mpv/Dio routinely embeds the full stream URL.
+      print('Error opening stream: ${StreamTuning.redactUrl(e.toString())}');
+      _handlePlaybackError(e.toString());
     }
   }
 
-  void _onBufferingStarted() {
-    _stallDetectionTimer?.cancel();
-    
-    final autoReconnect = ref.read(autoReconnectProvider);
-    if (!autoReconnect) return;
-    
-    // Start stall detection timer
-    _stallDetectionTimer = Timer(const Duration(seconds: 10), () {
-      if (mounted && _isBuffering && !_isReconnecting) {
-        _stallCount++;
-        print('Stall detected (count: $_stallCount). Attempting recovery...');
-        _attemptRecovery();
-      }
-    });
-  }
+  void _handlePlaybackError(String rawError) {
+    // mpv error text embeds the failing URL, credentials and all - both the log
+    // line and the on-screen message have to be redacted.
+    final error = StreamTuning.redactUrl(rawError);
 
-  void _onBufferingStopped() {
-    _stallDetectionTimer?.cancel();
-    _stallCount = 0;
-    _reconnectAttempts = 0;
-  }
-
-  void _startFreezeDetection() {
-    _freezeDetectionTimer?.cancel();
-    
-    // More frequent checks for freeze detection (every 1 second)
-    _freezeDetectionTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) {
-        timer.cancel();
-        return;
-      }
-      
-      // The actual freeze detection happens in the position listener
-      // This timer just ensures we're checking regularly even if position events slow down
-      if (_player.state.playing && !_isBuffering && !_isLoading && !_isReconnecting) {
-        // Force a state check
-        setState(() {});
-      }
-    });
-  }
-
-  void _stopFreezeDetection() {
-    _freezeDetectionTimer?.cancel();
-  }
-
-  void _handleFreeze() {
-    final autoReconnect = ref.read(autoReconnectProvider);
-    
-    setState(() {
-      _streamUnstable = true;
-    });
-    
-    if (autoReconnect && _reconnectAttempts < _maxReconnectAttempts) {
-      print('Auto-recovering from freeze...');
-      _attemptRecovery();
+    if (ref.read(autoReconnectProvider)) {
+      // Hand it to the watchdog rather than surfacing a dead end. Errors that
+      // arrive without a stall (a failed open, say) would otherwise never be
+      // noticed by the sampler.
+      print('Playback error: $error - handing to watchdog');
+      _watchdog.forceRecovery(userInitiated: false);
+      return;
     }
-  }
 
-  void _handlePlaybackError(String error) {
-    final autoReconnect = ref.read(autoReconnectProvider);
-    
-    if (autoReconnect && _reconnectAttempts < _maxReconnectAttempts) {
-      print('Playback error: $error. Attempting auto-recovery...');
-      _attemptRecovery();
-    } else {
+    if (mounted) {
       setState(() {
         _errorMessage = error;
         _isLoading = false;
@@ -300,80 +262,57 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
     }
   }
 
-  Future<void> _attemptRecovery() async {
-    if (_isReconnecting) return;
-    
-    _isReconnecting = true;
-    _reconnectAttempts++;
-    
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
-
-    // Calculate backoff delay
-    final delay = Duration(seconds: _reconnectAttempts * 2);
-    print('Reconnect attempt $_reconnectAttempts/$_maxReconnectAttempts in ${delay.inSeconds}s');
-    
-    await Future.delayed(delay);
-    
+  void _onWatchdogStatus(WatchdogStatus status) {
     if (!mounted) return;
-
-    try {
-      await _player.stop();
-      await Future.delayed(const Duration(milliseconds: 500));
-      await _player.open(Media(_currentChannel.streamUrl));
-      
-      _isReconnecting = false;
-      print('Recovery successful!');
-    } catch (e) {
-      _isReconnecting = false;
-      
-      if (_reconnectAttempts >= _maxReconnectAttempts) {
-        setState(() {
-          _errorMessage = 'Failed to recover stream after $_maxReconnectAttempts attempts.\n\nOriginal error: $e';
-          _isLoading = false;
-        });
-      } else {
-        // Try again
-        _attemptRecovery();
+    setState(() {
+      _watchdogStatus = status;
+      if (status.phase == WatchdogPhase.healthy) {
+        _errorMessage = null;
+        _isLoading = false;
       }
-    }
+    });
   }
 
-  Future<void> _openStream() async {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-      _reconnectAttempts = 0;
-    });
+  void _updateBufferHealth() {
+    final player = _player;
+    if (player == null || !mounted) return;
 
-    try {
-      print('Opening stream: ${_currentChannel.streamUrl}');
-      await _player.open(Media(_currentChannel.streamUrl));
-      print('Stream opened successfully');
-      _startHideTimer();
-    } catch (e, stackTrace) {
-      print('Error opening stream: $e');
-      print('Stack trace: $stackTrace');
-      _handlePlaybackError(e.toString());
+    final health = StreamTuning.bufferHealth(
+      player.state.buffer,
+      player.state.position,
+      ref.read(bufferModeProvider).seconds,
+    );
+
+    if ((health - _bufferHealth).abs() > 0.01) {
+      setState(() => _bufferHealth = health);
     }
   }
 
   @override
   void dispose() {
+    // Hand the system bars back to the rest of the app on the way out.
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
     _hideTimer?.cancel();
-    _stallDetectionTimer?.cancel();
-    _freezeDetectionTimer?.cancel();
-    _player.dispose();
+    _watchdog.dispose();
+    _cancelSubscriptions();
+    _player?.dispose();
     _focusNode.dispose();
     super.dispose();
   }
 
+  // ==========================================================================
+  // Channel / controls
+  // ==========================================================================
+
   void _startHideTimer() {
     _hideTimer?.cancel();
     _hideTimer = Timer(const Duration(seconds: 4), () {
-      if (mounted && _player.state.playing) {
+      if (mounted && (_player?.state.playing ?? false)) {
         setState(() => _showControls = false);
       }
     });
@@ -386,15 +325,18 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
 
   void _toggleFullscreen() {
     setState(() => _isFullscreen = !_isFullscreen);
-    
+
+    // The player is immersive for its whole lifetime (see initState), so the
+    // toggle only locks orientation: on = force landscape, off = allow rotation.
+    // Re-assert immersive here too, in case the system bars crept back after an
+    // app switch or a transient swipe-reveal.
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     if (_isFullscreen) {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.landscapeLeft,
         DeviceOrientation.landscapeRight,
       ]);
     } else {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.portraitUp,
         DeviceOrientation.landscapeLeft,
@@ -403,94 +345,100 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
     }
   }
 
-  void _switchChannel(Channel newChannel) async {
+  Future<void> _switchChannel(Channel newChannel) async {
     setState(() {
       _currentChannel = newChannel;
+      _streamUrl = newChannel.streamUrl;
       _isLoading = true;
       _errorMessage = null;
-      _reconnectAttempts = 0;
-      _stallCount = 0;
-      _frozenFrameCount = 0;
-      _streamUnstable = false;
-      _lastPosition = Duration.zero;
+      _bufferHealth = 0.0;
+      _watchdogStatus =
+          const WatchdogStatus(phase: WatchdogPhase.healthy, message: '');
     });
-    
+
     ref.read(channelStateProvider.notifier).markAsWatched(newChannel);
-    
-    try {
-      await _player.open(Media(newChannel.streamUrl));
-    } catch (e) {
-      _handlePlaybackError(e.toString());
-    }
+    await _openUrl(newChannel.streamUrl);
   }
 
   void _nextChannel() {
-    final nextChannel = ref.read(channelStateProvider.notifier).getNextChannel(_currentChannel);
-    if (nextChannel != null) {
-      _switchChannel(nextChannel);
-    }
+    final next =
+        ref.read(channelStateProvider.notifier).getNextChannel(_currentChannel);
+    if (next != null) _switchChannel(next);
   }
 
   void _previousChannel() {
-    final prevChannel = ref.read(channelStateProvider.notifier).getPreviousChannel(_currentChannel);
-    if (prevChannel != null) {
-      _switchChannel(prevChannel);
-    }
+    final previous = ref
+        .read(channelStateProvider.notifier)
+        .getPreviousChannel(_currentChannel);
+    if (previous != null) _switchChannel(previous);
+  }
+
+  /// Manual reconnect - the R key and the on-screen banner. Restores the
+  /// channel's original URL in case the watchdog had fallen back to an
+  /// alternate format that turned out to be worse.
+  void _manualReconnect() {
+    _streamUrl = _currentChannel.streamUrl;
+    setState(() => _errorMessage = null);
+    _watchdog.forceRecovery();
   }
 
   void _handleKeyEvent(KeyEvent event) {
     if (event is! KeyDownEvent) return;
-    
+
+    final player = _player;
     _showControlsTemporarily();
-    
+
     switch (event.logicalKey) {
       case LogicalKeyboardKey.space:
-        _player.playOrPause();
-        break;
+        player?.playOrPause();
       case LogicalKeyboardKey.arrowUp:
       case LogicalKeyboardKey.channelUp:
         _previousChannel();
-        break;
       case LogicalKeyboardKey.arrowDown:
       case LogicalKeyboardKey.channelDown:
         _nextChannel();
-        break;
       case LogicalKeyboardKey.arrowLeft:
-        if (!widget.isLive) {
-          final pos = _player.state.position;
-          _player.seek(pos - const Duration(seconds: 10));
+        if (!widget.isLive && player != null) {
+          player.seek(player.state.position - const Duration(seconds: 10));
         }
-        break;
       case LogicalKeyboardKey.arrowRight:
-        if (!widget.isLive) {
-          final pos = _player.state.position;
-          _player.seek(pos + const Duration(seconds: 10));
+        if (!widget.isLive && player != null) {
+          player.seek(player.state.position + const Duration(seconds: 10));
         }
-        break;
       case LogicalKeyboardKey.keyM:
-        final vol = _player.state.volume;
-        _player.setVolume(vol > 0 ? 0 : 100);
-        break;
+        if (player != null) {
+          player.setVolume(player.state.volume > 0 ? 0 : 100);
+        }
       case LogicalKeyboardKey.keyF:
         _toggleFullscreen();
-        break;
       case LogicalKeyboardKey.keyR:
-        // Manual reconnect
-        _reconnectAttempts = 0;
-        _attemptRecovery();
-        break;
+        _manualReconnect();
       case LogicalKeyboardKey.escape:
         if (_isFullscreen) {
           _toggleFullscreen();
         } else {
           widget.onClose?.call();
         }
-        break;
     }
   }
 
+  // ==========================================================================
+  // Build
+  // ==========================================================================
+
   @override
   Widget build(BuildContext context) {
+    // Cache sizing applies live, so a buffer-mode change takes effect on the
+    // running stream rather than waiting for the next channel change.
+    ref.listen<BufferMode>(bufferModeProvider, (_, mode) {
+      final player = _player;
+      if (player != null) {
+        StreamTuning.apply(player, mode: mode, isLive: widget.isLive);
+      }
+    });
+
+    final controller = _controller;
+
     return KeyboardListener(
       focusNode: _focusNode,
       autofocus: true,
@@ -502,35 +450,29 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              // Video
-              Center(
-                child: Video(
-                  controller: _controller,
-                  controls: NoVideoControls,
-                ),
-              ),
+              if (controller != null)
+                Center(
+                  child: Video(
+                    controller: controller,
+                    controls: NoVideoControls,
+                  ),
+                )
+              else
+                const ColoredBox(color: Colors.black),
 
-              // Loading overlay
-              if (_isLoading)
-                _buildLoadingOverlay(),
+              if (_isLoading) _buildLoadingOverlay(),
 
-              // Buffering indicator (when playing but buffering)
-              if (_isBuffering && !_isLoading)
-                _buildBufferingIndicator(),
+              if (_isBuffering && !_isLoading) _buildBufferingIndicator(),
 
-              // Stream unstable warning
-              if (_streamUnstable && !_isLoading && !_isBuffering)
-                _buildUnstableWarning(),
+              // Recovery banner - shown whenever the watchdog is not happy and
+              // we are not already covered by the loading overlay.
+              if (!_watchdogStatus.isHealthy && !_isLoading)
+                _buildWatchdogBanner(),
 
-              // Error
-              if (_errorMessage != null)
-                _buildErrorView(),
+              if (_errorMessage != null) _buildErrorView(),
 
-              // Controls
-              if (_showControls && _errorMessage == null)
-                _buildControls(),
-                
-              // Buffer health indicator (always visible when controls are shown)
+              if (_showControls && _errorMessage == null) _buildControls(),
+
               if (_showControls && _errorMessage == null && widget.isLive)
                 _buildBufferHealthIndicator(),
             ],
@@ -542,7 +484,8 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
 
   Widget _buildLoadingOverlay() {
     final bufferMode = ref.watch(bufferModeProvider);
-    
+    final recovering = _watchdogStatus.isRecovering;
+
     return Container(
       color: Colors.black54,
       child: Center(
@@ -552,15 +495,16 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
             const CircularProgressIndicator(color: AppTheme.primaryColor),
             const SizedBox(height: 16),
             Text(
-              _isReconnecting 
-                  ? 'Reconnecting... (Attempt $_reconnectAttempts/$_maxReconnectAttempts)'
-                  : 'Buffering...',
+              recovering ? _watchdogStatus.message : 'Buffering...',
               style: const TextStyle(color: Colors.white),
             ),
             const SizedBox(height: 8),
             Text(
               'Buffer mode: ${bufferMode.label}',
-              style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12),
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.5),
+                fontSize: 12,
+              ),
             ),
           ],
         ),
@@ -569,18 +513,14 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
   }
 
   Widget _buildBufferingIndicator() {
-    return Positioned(
+    return const Positioned(
       top: 100,
       left: 0,
       right: 0,
       child: Center(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.black54,
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: const Row(
+        child: _Pill(
+          color: Colors.black54,
+          child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               SizedBox(
@@ -603,35 +543,60 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
     );
   }
 
-  Widget _buildUnstableWarning() {
+  /// Status banner for everything the watchdog is doing. Deliberately
+  /// non-blocking: recovery continues on its own, and tapping only short-cuts
+  /// the wait rather than being the thing that makes recovery happen.
+  Widget _buildWatchdogBanner() {
+    final status = _watchdogStatus;
+    final autoReconnect = ref.watch(autoReconnectProvider);
+
+    final Color color;
+    final IconData icon;
+    final String label;
+
+    switch (status.phase) {
+      case WatchdogPhase.degraded:
+        color = AppTheme.warningColor;
+        icon = Icons.warning_amber;
+        label = autoReconnect
+            ? status.message
+            : 'Stream frozen - auto reconnect is off. Tap to reconnect';
+      case WatchdogPhase.recovering:
+      case WatchdogPhase.verifying:
+        color = AppTheme.primaryColor;
+        icon = Icons.autorenew;
+        label = status.message;
+      case WatchdogPhase.backingOff:
+        color = AppTheme.errorColor;
+        icon = Icons.cloud_off;
+        label = status.message;
+      case WatchdogPhase.healthy:
+        return const SizedBox.shrink();
+    }
+
     return Positioned(
       top: 100,
       left: 0,
       right: 0,
       child: Center(
         child: GestureDetector(
-          onTap: () {
-            _reconnectAttempts = 0;
-            _attemptRecovery();
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              color: AppTheme.warningColor.withOpacity(0.9),
-              borderRadius: BorderRadius.circular(20),
-            ),
+          onTap: _manualReconnect,
+          child: _Pill(
+            color: color.withValues(alpha: 0.9),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.warning_amber, color: Colors.white, size: 16),
+                Icon(icon, color: Colors.white, size: 16),
                 const SizedBox(width: 8),
                 Text(
-                  _isReconnecting 
-                      ? 'Reconnecting... (${_reconnectAttempts}/$_maxReconnectAttempts)'
-                      : 'Stream frozen - Tap to reconnect',
-                  style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
+                  label,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
-                if (_isReconnecting) ...[
+                if (status.isRecovering) ...[
                   const SizedBox(width: 8),
                   const SizedBox(
                     width: 12,
@@ -651,7 +616,7 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
   }
 
   Widget _buildBufferHealthIndicator() {
-    Color healthColor;
+    final Color healthColor;
     if (_bufferHealth > 0.7) {
       healthColor = AppTheme.successColor;
     } else if (_bufferHealth > 0.3) {
@@ -673,7 +638,9 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              _bufferHealth > 0.5 ? Icons.signal_cellular_alt : Icons.signal_cellular_alt_2_bar,
+              _bufferHealth > 0.5
+                  ? Icons.signal_cellular_alt
+                  : Icons.signal_cellular_alt_2_bar,
               color: healthColor,
               size: 14,
             ),
@@ -707,7 +674,10 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
           const SizedBox(height: 16),
           Text(
             'Playback Error',
-            style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white),
+            style: Theme.of(context)
+                .textTheme
+                .headlineSmall
+                ?.copyWith(color: Colors.white),
           ),
           const SizedBox(height: 8),
           Padding(
@@ -718,15 +688,25 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
               textAlign: TextAlign.center,
             ),
           ),
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Text(
+              'Turn on Auto Reconnect in Settings to recover from this '
+              'automatically.',
+              style: TextStyle(
+                color: AppTheme.textMuted,
+                fontSize: 12,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ),
           const SizedBox(height: 24),
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               ElevatedButton.icon(
-                onPressed: () {
-                  _reconnectAttempts = 0;
-                  _openStream();
-                },
+                onPressed: _manualReconnect,
                 icon: const Icon(Icons.refresh),
                 label: const Text('Retry'),
               ),
@@ -761,23 +741,18 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
             colors: [
-              Colors.black.withOpacity(0.7),
+              Colors.black.withValues(alpha: 0.7),
               Colors.transparent,
               Colors.transparent,
-              Colors.black.withOpacity(0.7),
+              Colors.black.withValues(alpha: 0.7),
             ],
             stops: const [0.0, 0.2, 0.8, 1.0],
           ),
         ),
         child: Column(
           children: [
-            // Top bar
             _buildTopBar(currentProgram?.title),
-            
-            // Center controls
             Expanded(child: _buildCenterControls()),
-            
-            // Bottom bar
             _buildBottomBar(),
           ],
         ),
@@ -813,7 +788,10 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
                   if (programTitle != null)
                     Text(
                       programTitle,
-                      style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 14),
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.7),
+                        fontSize: 14,
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -832,14 +810,22 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
                   children: [
                     Icon(Icons.circle, color: Colors.white, size: 8),
                     SizedBox(width: 4),
-                    Text('LIVE', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                    Text(
+                      'LIVE',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   ],
                 ),
               ),
             if (widget.onMinimize != null) ...[
               const SizedBox(width: 8),
               IconButton(
-                icon: const Icon(Icons.picture_in_picture_alt, color: Colors.white),
+                icon: const Icon(Icons.picture_in_picture_alt,
+                    color: Colors.white),
                 onPressed: widget.onMinimize,
                 tooltip: 'Mini player',
               ),
@@ -851,62 +837,53 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
   }
 
   Widget _buildCenterControls() {
+    final player = _player;
+
     return Center(
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          // Previous channel
           IconButton(
             icon: const Icon(Icons.skip_previous, color: Colors.white, size: 36),
             onPressed: _previousChannel,
             tooltip: 'Previous channel (↑)',
           ),
-          
           const SizedBox(width: 24),
-          
-          // Seek backward (VOD only)
           if (!widget.isLive)
             IconButton(
               icon: const Icon(Icons.replay_10, color: Colors.white, size: 36),
-              onPressed: () {
-                final pos = _player.state.position;
-                _player.seek(pos - const Duration(seconds: 10));
-              },
+              onPressed: player == null
+                  ? null
+                  : () => player
+                      .seek(player.state.position - const Duration(seconds: 10)),
             ),
-          
           const SizedBox(width: 16),
-          
-          // Play/Pause
           Container(
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.2),
+              color: Colors.white.withValues(alpha: 0.2),
               shape: BoxShape.circle,
             ),
             child: IconButton(
               iconSize: 64,
               icon: Icon(
-                _player.state.playing ? Icons.pause : Icons.play_arrow,
+                (player?.state.playing ?? false)
+                    ? Icons.pause
+                    : Icons.play_arrow,
                 color: Colors.white,
               ),
-              onPressed: () => _player.playOrPause(),
+              onPressed: player == null ? null : () => player.playOrPause(),
             ),
           ),
-          
           const SizedBox(width: 16),
-          
-          // Seek forward (VOD only)
           if (!widget.isLive)
             IconButton(
               icon: const Icon(Icons.forward_10, color: Colors.white, size: 36),
-              onPressed: () {
-                final pos = _player.state.position;
-                _player.seek(pos + const Duration(seconds: 10));
-              },
+              onPressed: player == null
+                  ? null
+                  : () => player
+                      .seek(player.state.position + const Duration(seconds: 10)),
             ),
-          
           const SizedBox(width: 24),
-          
-          // Next channel
           IconButton(
             icon: const Icon(Icons.skip_next, color: Colors.white, size: 36),
             onPressed: _nextChannel,
@@ -918,33 +895,32 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
   }
 
   Widget _buildBottomBar() {
+    final player = _player;
+
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Row(
         children: [
-          // Volume
           IconButton(
             icon: Icon(
-              _player.state.volume == 0 ? Icons.volume_off : Icons.volume_up,
+              (player?.state.volume ?? 0) == 0
+                  ? Icons.volume_off
+                  : Icons.volume_up,
               color: Colors.white,
             ),
-            onPressed: () {
-              final vol = _player.state.volume;
-              _player.setVolume(vol > 0 ? 0 : 100);
-            },
+            onPressed: player == null
+                ? null
+                : () => player.setVolume(player.state.volume > 0 ? 0 : 100),
           ),
-          
           const Spacer(),
-          
-          // Keyboard shortcuts hint
           Text(
             'Space: Play/Pause • ↑↓: Channel • M: Mute • R: Reconnect • F: Fullscreen',
-            style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 11),
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.5),
+              fontSize: 11,
+            ),
           ),
-          
           const Spacer(),
-          
-          // Fullscreen
           IconButton(
             icon: Icon(
               _isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
@@ -954,6 +930,26 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Rounded translucent container used by the buffering and watchdog banners.
+class _Pill extends StatelessWidget {
+  final Color color;
+  final Widget child;
+
+  const _Pill({required this.color, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: child,
     );
   }
 }

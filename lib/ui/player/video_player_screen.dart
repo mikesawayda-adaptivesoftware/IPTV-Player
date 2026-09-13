@@ -5,8 +5,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../../core/player/stream_tuning.dart';
+import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
-import '../../providers/player_provider.dart';
+import 'enhanced_video_player.dart' show autoReconnectProvider, bufferModeProvider;
 import 'video_player_controls.dart';
 import 'web_video_player.dart';
 
@@ -38,9 +40,24 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
   bool _isLoading = true;
   String? _errorMessage;
 
+  StreamWatchdog? _watchdog;
+  String _streamUrl = '';
+
+  /// Where the viewer actually is. Recovery for VOD has to resume from here -
+  /// restarting a two-hour film from zero would be worse than the freeze it is
+  /// fixing.
+  Duration _resumePosition = Duration.zero;
+
   @override
   void initState() {
     super.initState();
+    _streamUrl = widget.streamUrl;
+
+    // Immersive for the whole player lifetime - hide the phone's status bar and
+    // nav buttons so video is truly full-screen. Restored in dispose. No-op on
+    // desktop.
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+
     if (!kIsWeb) {
       _initializePlayer();
     }
@@ -53,6 +70,12 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
       configuration: const VideoControllerConfiguration(
         enableHardwareAcceleration: false, // Force software rendering
       ),
+    );
+
+    await StreamTuning.apply(
+      _player,
+      mode: ref.read(bufferModeProvider),
+      isLive: widget.isLive,
     );
 
     // Listen to player state changes
@@ -68,30 +91,85 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
       }
     });
 
+    _player.stream.position.listen((position) {
+      if (position > Duration.zero) _resumePosition = position;
+    });
+
     _player.stream.error.listen((error) {
-      if (mounted && error.isNotEmpty) {
+      if (!mounted || error.isEmpty) return;
+      if (ref.read(autoReconnectProvider)) {
+        _watchdog?.forceRecovery(userInitiated: false);
+      } else {
         setState(() {
-          _errorMessage = error;
+          _errorMessage = StreamTuning.redactUrl(error);
           _isLoading = false;
         });
       }
     });
 
-    // Start playback
+    // The recreate step is not offered here: _player is a `late final` field
+    // that the rest of this screen reads directly, so it cannot be swapped out.
+    // Reopen, hard reopen and the alternate-format fallback all still apply,
+    // and for seekable VOD the nudge step is a seek, which flushes the decoder
+    // and covers most of what recreate would have.
+    _watchdog = StreamWatchdog(
+      playerRef: () => _player,
+      urlRef: () => _streamUrl,
+      enabled: () => ref.read(autoReconnectProvider),
+      isLive: widget.isLive,
+      onOpen: _openAndResume,
+      onUrlChanged: (url) => _streamUrl = url,
+      onStatus: (status) {
+        if (!mounted) return;
+        setState(() {
+          if (status.phase == WatchdogPhase.healthy) _errorMessage = null;
+        });
+      },
+    );
+
     try {
-      await _player.open(Media(widget.streamUrl));
+      await _openAndResume(_streamUrl);
+      _watchdog!.start();
     } catch (e) {
       if (mounted) {
         setState(() {
-          _errorMessage = 'Failed to open stream: $e';
+          _errorMessage =
+              'Failed to open stream: ${StreamTuning.redactUrl(e.toString())}';
           _isLoading = false;
         });
       }
     }
   }
 
+  /// Opens [url] and, for VOD, seeks back to where the viewer was.
+  Future<void> _openAndResume(String url) async {
+    await _player.open(Media(url));
+    _watchdog?.noteStreamOpened();
+
+    if (!widget.isLive && _resumePosition > Duration.zero) {
+      // The seek has to wait for the demuxer to report a duration, otherwise it
+      // is silently dropped and playback restarts from the beginning.
+      try {
+        await _player.stream.duration
+            .firstWhere((d) => d > Duration.zero)
+            .timeout(const Duration(seconds: 10));
+        await _player.seek(_resumePosition);
+      } catch (e) {
+        print('Could not restore VOD position: $e');
+      }
+    }
+  }
+
   @override
   void dispose() {
+    // Restore the system bars for the rest of the app.
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    _watchdog?.dispose();
     if (!kIsWeb) {
       _player.dispose();
     }
@@ -103,14 +181,15 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
       _isFullscreen = !_isFullscreen;
     });
 
+    // Player stays immersive throughout (see initState); the toggle only locks
+    // orientation. Re-assert immersive in case the bars crept back.
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     if (_isFullscreen) {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.landscapeLeft,
         DeviceOrientation.landscapeRight,
       ]);
     } else {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.portraitUp,
         DeviceOrientation.landscapeLeft,

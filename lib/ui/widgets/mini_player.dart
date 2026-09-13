@@ -3,13 +3,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../../core/player/stream_tuning.dart';
+import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/channel.dart';
 import '../player/enhanced_video_player.dart';
 
 // Mini player state provider
 final miniPlayerProvider = StateNotifierProvider<MiniPlayerNotifier, MiniPlayerState>((ref) {
-  return MiniPlayerNotifier();
+  return MiniPlayerNotifier(ref);
 });
 
 class MiniPlayerState {
@@ -45,24 +47,63 @@ class MiniPlayerState {
 }
 
 class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
-  MiniPlayerNotifier() : super(const MiniPlayerState());
+  final Ref _ref;
+
+  StreamWatchdog? _watchdog;
+  String? _url;
+
+  MiniPlayerNotifier(this._ref) : super(const MiniPlayerState());
 
   Future<void> play(Channel channel) async {
-    // Dispose existing player
-    state.player?.dispose();
-    
+    _watchdog?.dispose();
+    _watchdog = null;
+
+    _url = channel.streamUrl;
+    await _createPlayer(channel, _url!);
+
+    // The mini player is by definition unattended - it sits in the corner while
+    // the user does something else - so it needs recovery at least as much as
+    // the full-screen player does.
+    _watchdog = StreamWatchdog(
+      playerRef: () => state.player,
+      urlRef: () => _url ?? '',
+      enabled: () => _ref.read(autoReconnectProvider),
+      onRecreate: (url) => _createPlayer(state.channel ?? channel, url),
+      onUrlChanged: (url) => _url = url,
+    )..start();
+  }
+
+  Future<void> _createPlayer(Channel channel, String url) async {
+    final old = state.player;
+    if (old != null) {
+      try {
+        await old.dispose();
+      } catch (e) {
+        print('Error disposing mini player: $e');
+      }
+    }
+
     final player = Player();
     final controller = VideoController(player);
-    
-    state = state.copyWith(
+
+    // Publish before tuning - setProperty waits on VideoController
+    // initialisation, which needs the Video widget mounted.
+    state = MiniPlayerState(
       channel: channel,
       player: player,
       controller: controller,
       isVisible: true,
-      isExpanded: false,
+      isExpanded: state.isExpanded,
     );
-    
-    await player.open(Media(channel.streamUrl));
+
+    await StreamTuning.apply(
+      player,
+      mode: _ref.read(bufferModeProvider),
+      isLive: true,
+    );
+
+    await player.open(Media(url));
+    _watchdog?.noteStreamOpened();
   }
 
   void expand() {
@@ -74,12 +115,22 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
   }
 
   void hide() {
+    _watchdog?.dispose();
+    _watchdog = null;
+    _url = null;
     state.player?.dispose();
     state = const MiniPlayerState();
   }
 
   void togglePlayPause() {
     state.player?.playOrPause();
+  }
+
+  @override
+  void dispose() {
+    _watchdog?.dispose();
+    state.player?.dispose();
+    super.dispose();
   }
 }
 

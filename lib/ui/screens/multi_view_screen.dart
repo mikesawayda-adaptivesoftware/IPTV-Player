@@ -1,12 +1,17 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../../core/player/stream_tuning.dart';
+import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/channel.dart';
 import '../../providers/playlist_provider.dart';
+import '../player/enhanced_video_player.dart' show autoReconnectProvider, bufferModeProvider;
 
 class MultiViewScreen extends ConsumerStatefulWidget {
   final List<Channel> initialChannels;
@@ -42,6 +47,8 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
 
   @override
   void dispose() {
+    // Restore the system bars in case we left while fullscreen (immersive).
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     for (final slot in _slots) {
       slot.dispose();
     }
@@ -49,51 +56,91 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
     super.dispose();
   }
 
-  void _addChannelToSlot(int slotIndex, Channel channel) async {
+  Future<void> _addChannelToSlot(int slotIndex, Channel channel) async {
     final slot = _slots[slotIndex];
-    
-    // Dispose existing player if any
+
+    // Fully tear down whatever was here, watchdog included.
     slot.dispose();
-    
-    // Create new player with buffer configuration
-    slot.player = Player(
-      configuration: PlayerConfiguration(
-        bufferSize: 64 * 1024 * 1024, // 64MB buffer
+
+    slot.channel = channel;
+    slot.url = channel.streamUrl;
+    slot.isLoading = true;
+    slot.error = null;
+    setState(() {});
+
+    await _createSlotPlayer(slotIndex, slot.url!);
+
+    // Each tile gets its own watchdog. A frozen tile in a 2x2 grid is easy to
+    // miss - especially a muted one - so unattended recovery matters more here
+    // than in the full-screen player, not less.
+    slot.watchdog = StreamWatchdog(
+      playerRef: () => slot.player,
+      urlRef: () => slot.url ?? '',
+      enabled: () => ref.read(autoReconnectProvider),
+      onRecreate: (url) => _createSlotPlayer(slotIndex, url),
+      onUrlChanged: (url) => slot.url = url,
+      onStatus: (status) {
+        if (!mounted) return;
+        setState(() => slot.status = status);
+      },
+    )..start();
+
+    ref.read(channelStateProvider.notifier).markAsWatched(channel);
+  }
+
+  /// Builds (or rebuilds) the player for a slot and opens [url] on it.
+  /// Used both for the initial open and for the watchdog's recreate step.
+  Future<void> _createSlotPlayer(int slotIndex, String url) async {
+    final slot = _slots[slotIndex];
+
+    await slot.disposePlayer();
+    if (mounted) setState(() => slot.isLoading = true);
+
+    final player = Player(
+      configuration: const PlayerConfiguration(
+        bufferSize: 64 * 1024 * 1024,
       ),
     );
-    slot.controller = VideoController(slot.player!);
-    slot.channel = channel;
-    slot.isLoading = true;
-    
-    setState(() {});
-    
-    // Set up listeners
-    slot.player!.stream.buffering.listen((buffering) {
-      if (mounted) {
-        setState(() => slot.isLoading = buffering);
+
+    // Publish before tuning - setProperty waits on VideoController
+    // initialisation, which needs the Video widget mounted.
+    slot.player = player;
+    slot.controller = VideoController(player);
+    if (mounted) setState(() {});
+
+    await StreamTuning.apply(
+      player,
+      mode: ref.read(bufferModeProvider),
+      isLive: true,
+    );
+
+    slot.subscriptions.add(player.stream.buffering.listen((buffering) {
+      if (mounted) setState(() => slot.isLoading = buffering);
+    }));
+
+    slot.subscriptions.add(player.stream.error.listen((error) {
+      if (!mounted || error.isEmpty) return;
+      if (ref.read(autoReconnectProvider)) {
+        slot.watchdog?.forceRecovery(userInitiated: false);
+      } else {
+        setState(() => slot.error = StreamTuning.redactUrl(error));
       }
-    });
-    
-    slot.player!.stream.error.listen((error) {
-      if (mounted && error.isNotEmpty) {
-        setState(() => slot.error = error);
-      }
-    });
-    
-    // Mute unless this is the active audio slot
+    }));
+
+    // Only the active audio slot is audible.
     if (slotIndex != _activeAudioSlot) {
-      slot.player!.setVolume(0);
+      await player.setVolume(0);
     }
-    
+
+    if (mounted) setState(() {});
+
     try {
-      await slot.player!.open(Media(channel.streamUrl));
-      
-      // Mark as watched
-      ref.read(channelStateProvider.notifier).markAsWatched(channel);
+      await player.open(Media(url));
+      slot.watchdog?.noteStreamOpened();
     } catch (e) {
       if (mounted) {
         setState(() {
-          slot.error = e.toString();
+          slot.error = StreamTuning.redactUrl(e.toString());
           slot.isLoading = false;
         });
       }
@@ -276,7 +323,8 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
                 child: CircularProgressIndicator(color: AppTheme.primaryColor),
               ),
             
-            // Error overlay
+            // Recovery / error overlay. Recovery is reported per tile so a
+            // frozen muted stream is visible rather than silently dead.
             if (slot.error != null)
               Container(
                 color: Colors.black54,
@@ -288,9 +336,33 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
                       const SizedBox(height: 8),
                       Text(
                         'Error',
-                        style: TextStyle(color: Colors.white.withOpacity(0.7)),
+                        style:
+                            TextStyle(color: Colors.white.withOpacity(0.7)),
                       ),
                     ],
+                  ),
+                ),
+              )
+            else if (!slot.status.isHealthy)
+              Align(
+                alignment: Alignment.topCenter,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: (slot.status.isRecovering
+                              ? AppTheme.primaryColor
+                              : AppTheme.warningColor)
+                          .withOpacity(0.9),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      slot.status.message,
+                      style: const TextStyle(
+                          color: Colors.white, fontSize: 10),
+                    ),
                   ),
                 ),
               ),
@@ -434,15 +506,46 @@ class _PlayerSlot {
   Player? player;
   VideoController? controller;
   Channel? channel;
+
+  /// Tracked separately from [channel] because the watchdog may fall back to
+  /// the provider's alternate stream format for this slot.
+  String? url;
+
   bool isLoading = false;
   String? error;
-  
-  void dispose() {
-    player?.dispose();
+
+  StreamWatchdog? watchdog;
+  WatchdogStatus status =
+      const WatchdogStatus(phase: WatchdogPhase.healthy, message: '');
+
+  final List<StreamSubscription> subscriptions = [];
+
+  /// Disposes the player only, leaving the watchdog running - this is what the
+  /// recreate recovery step needs.
+  Future<void> disposePlayer() async {
+    for (final subscription in subscriptions) {
+      await subscription.cancel();
+    }
+    subscriptions.clear();
+
+    final old = player;
     player = null;
     controller = null;
+    try {
+      await old?.dispose();
+    } catch (e) {
+      print('Error disposing multi-view player: $e');
+    }
+  }
+
+  /// Full teardown, including the watchdog.
+  void dispose() {
+    watchdog?.dispose();
+    watchdog = null;
+    disposePlayer();
     isLoading = false;
     error = null;
+    status = const WatchdogStatus(phase: WatchdogPhase.healthy, message: '');
   }
 }
 
