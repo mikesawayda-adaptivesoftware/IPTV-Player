@@ -184,7 +184,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             const SizedBox(height: 4),
             Text(
-              'Higher buffer = more stability, but more delay',
+              'Higher buffer = more stability, but more delay. Applies to the '
+              'running stream immediately.',
               style: TextStyle(fontSize: 12, color: AppTheme.textMuted),
             ),
             const SizedBox(height: 12),
@@ -214,7 +215,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             SwitchListTile(
               title: const Text('Auto Reconnect'),
               subtitle: Text(
-                'Automatically reconnect when stream freezes or errors',
+                'Detect frozen video and recover on its own, escalating from a '
+                'quick resync up to restarting the player. Keeps retrying '
+                'rather than giving up.',
                 style: TextStyle(fontSize: 12, color: AppTheme.textMuted),
               ),
               value: autoReconnect,
@@ -425,17 +428,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _pickM3UFile() async {
-    final result = await FilePicker.platform.pickFiles(
+    // file_picker 12.x: pickFiles is static (no .platform) and returns the
+    // list of picked files directly rather than a nullable result wrapper.
+    final files = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['m3u', 'm3u8'],
     );
 
-    if (result != null && result.files.single.path != null) {
-      final path = result.files.single.path!;
-      final name = result.files.single.name.replaceAll(RegExp(r'\.(m3u8?|M3U8?)$'), '');
-      
-      ref.read(playlistSourcesProvider.notifier).addM3UPlaylist(name, path);
-    }
+    if (files.isEmpty) return;
+    final picked = files.first;
+    final path = picked.path;
+    if (path == null) return;
+
+    final name = picked.name.replaceAll(RegExp(r'\.(m3u8?|M3U8?)$'), '');
+    ref.read(playlistSourcesProvider.notifier).addM3UPlaylist(name, path);
   }
 
   void _confirmDeletePlaylist(PlaylistSource source) {

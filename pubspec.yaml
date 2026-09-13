@@ -38,7 +38,7 @@ dependencies:
   xml: ^6.5.0
   
   # File Handling
-  file_picker: ^6.1.1
+  file_picker: ^12.0.0
   path_provider: ^2.1.2
   path: ^1.8.3
   
