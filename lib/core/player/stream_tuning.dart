@@ -69,10 +69,30 @@ class StreamTuning {
   /// initialisation, and the controller cannot initialise until a Video widget
   /// mounts - so applying tuning before the first build deadlocks until every
   /// property times out. That cost ~30s per recovery when it was wrong.
+  ///
+  /// [hlsBitrate] is mpv's `hls-bitrate`: `max` (default) takes the best
+  /// rendition a master playlist offers, `min` the cheapest. It is read by the
+  /// HLS demuxer at open time, so changing it only takes effect on the next
+  /// `open()` - budget a quality change that uses it as a reopen, not as an
+  /// in-place tweak.
+  ///
+  /// [videoDisabled] switches video decoding off entirely. On a real HLS master
+  /// with an audio-only rendition this drops bandwidth as well; on a muxed
+  /// MPEG-TS it does not, because the demuxer still has to read the whole
+  /// transport stream to keep audio current and simply discards the video
+  /// packets. It saves decode work either way.
+  ///
+  /// Both live here rather than in a separate `applyQuality` on purpose. This
+  /// method is the only path that re-applies mpv properties after a `recreate`,
+  /// so splitting them would mean every call site had to remember to call both,
+  /// in the right order, before `open()` - and forgetting one would silently
+  /// reset quality on the next recovery.
   static Future<void> apply(
     Player player, {
     required BufferMode mode,
     required bool isLive,
+    String hlsBitrate = 'max',
+    bool videoDisabled = false,
   }) async {
     final native = player.platform;
     if (native is! NativePlayer) return;
@@ -116,7 +136,11 @@ class StreamTuning {
       'keep-open': isLive ? 'no' : 'yes',
       // Drop frames rather than accumulating A/V desync after a network hiccup.
       'framedrop': 'vo',
-      'hls-bitrate': 'max',
+
+      // --- quality ---
+      // `auto` rather than `yes`: mpv's `vid` takes auto|no|<track id>.
+      'vid': videoDisabled ? 'no' : 'auto',
+      'hls-bitrate': hlsBitrate,
     };
 
     // Concurrently, so a property that blocks costs one timeout rather than

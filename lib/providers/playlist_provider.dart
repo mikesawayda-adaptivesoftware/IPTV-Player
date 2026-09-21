@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
+import '../core/player/stream_quality.dart';
 import '../data/models/category.dart';
 import '../data/models/channel.dart';
 import '../data/models/epg_program.dart';
@@ -84,6 +85,22 @@ final activePlaylistProvider = Provider<PlaylistSource?>((ref) {
   }
 });
 
+/// Reduces a [Channel] to what quality grouping needs.
+///
+/// Keeps `core/` free of `data/` models, which is the existing convention, and
+/// means the grouping heuristics can be tested without Hive. `categoryId` is
+/// the Xtream signal and `groupTitle` the M3U one; providers populate one or
+/// the other, rarely both.
+QualityCandidate _qualityCandidate(Channel channel) {
+  return QualityCandidate(
+    id: channel.id,
+    name: channel.name,
+    url: channel.streamUrl,
+    tvgId: channel.epgChannelId,
+    category: channel.categoryId ?? channel.groupTitle,
+  );
+}
+
 // Channel state
 class ChannelState {
   final List<Channel> channels;
@@ -92,12 +109,23 @@ class ChannelState {
   final bool isLoading;
   final String? error;
 
+  /// Sibling lookup used by the player to drop to a lower-bitrate variant of
+  /// whatever is playing.
+  ///
+  /// Built once per [ChannelStateNotifier.loadChannels] and carried here rather
+  /// than derived in its own provider: `markAsWatched` rebuilds the whole
+  /// channel list on *every* channel open, so a derived provider would
+  /// re-normalise every name in the playlist at the exact moment the user tunes
+  /// a channel.
+  final QualityIndex qualityIndex;
+
   const ChannelState({
     this.channels = const [],
     this.categories = const [],
     this.selectedCategoryId,
     this.isLoading = false,
     this.error,
+    this.qualityIndex = const QualityIndex.empty(),
   });
 
   ChannelState copyWith({
@@ -106,6 +134,7 @@ class ChannelState {
     String? selectedCategoryId,
     bool? isLoading,
     String? error,
+    QualityIndex? qualityIndex,
   }) {
     return ChannelState(
       channels: channels ?? this.channels,
@@ -113,6 +142,7 @@ class ChannelState {
       selectedCategoryId: selectedCategoryId ?? this.selectedCategoryId,
       isLoading: isLoading ?? this.isLoading,
       error: error,
+      qualityIndex: qualityIndex ?? this.qualityIndex,
     );
   }
 
@@ -209,6 +239,7 @@ class ChannelStateNotifier extends StateNotifier<ChannelState> {
         channels: channels,
         categories: categories,
         isLoading: false,
+        qualityIndex: QualityIndex.build(channels.map(_qualityCandidate)),
       );
     } catch (e) {
       state = state.copyWith(

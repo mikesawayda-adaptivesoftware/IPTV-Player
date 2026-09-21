@@ -3,10 +3,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../../core/player/quality_controller.dart';
+import '../../core/player/stream_quality.dart';
 import '../../core/player/stream_tuning.dart';
 import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/channel.dart';
+import '../../providers/playlist_provider.dart';
 import '../player/enhanced_video_player.dart';
 
 // Mini player state provider
@@ -50,6 +53,7 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
   final Ref _ref;
 
   StreamWatchdog? _watchdog;
+  QualityController? _quality;
   String? _url;
 
   MiniPlayerNotifier(this._ref) : super(const MiniPlayerState());
@@ -57,20 +61,88 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
   Future<void> play(Channel channel) async {
     _watchdog?.dispose();
     _watchdog = null;
+    _quality?.dispose();
+    _quality = null;
 
     _url = channel.streamUrl;
-    await _createPlayer(channel, _url!);
+
+    final quality = QualityController(
+      playerRef: () => state.player,
+      watchdogRef: () => _watchdog,
+      onApply: _applyQuality,
+      autoEnabled: _autoQualityEnabled,
+    );
+    _quality = quality;
+    quality.setOptions(
+      _ref.read(channelStateProvider).qualityIndex.optionsFor(
+            channelId: channel.id,
+            sourceLabel: channel.name,
+            currentUrl: channel.streamUrl,
+          ),
+    );
 
     // The mini player is by definition unattended - it sits in the corner while
     // the user does something else - so it needs recovery at least as much as
     // the full-screen player does.
+    //
+    // Built before the first open, so that open is actually reported. It used
+    // to be constructed afterwards, which made the initial noteStreamOpened a
+    // no-op.
     _watchdog = StreamWatchdog(
       playerRef: () => state.player,
       urlRef: () => _url ?? '',
       enabled: () => _ref.read(autoReconnectProvider),
       onRecreate: (url) => _createPlayer(state.channel ?? channel, url),
+      // Without this, reopen and hardReopen went straight to player.open and
+      // their opens were never reported back to the watchdog.
+      onOpen: _openUrl,
       onUrlChanged: (url) => _url = url,
-    )..start();
+      canDegradeQuality: () => _autoQualityEnabled() && quality.canDegrade,
+      onDegradeQuality: quality.degrade,
+      onCongested: quality.degrade,
+    );
+
+    await _createPlayer(channel, _url!);
+
+    _watchdog?.start();
+    quality.start();
+  }
+
+  bool _autoQualityEnabled() {
+    return _ref.read(qualityPolicyProvider) == QualityPolicy.auto &&
+        _ref.read(autoReconnectProvider);
+  }
+
+  /// The one place mpv tuning is applied here, so buffer mode and quality
+  /// cannot overwrite one another.
+  Future<void> _applyTuning(Player player) {
+    final option = _quality?.current;
+    return StreamTuning.apply(
+      player,
+      mode: _ref.read(bufferModeProvider),
+      isLive: true,
+      hlsBitrate: option?.hlsBitrate ?? 'max',
+      videoDisabled: option?.videoDisabled ?? false,
+    );
+  }
+
+  Future<void> _applyQuality(
+    QualityOption option, {
+    required bool userInitiated,
+  }) async {
+    final player = state.player;
+    if (player == null) return;
+    // Read at open time, so tuning has to precede the open.
+    await _applyTuning(player);
+    await _openUrl(option.url, userInitiated: userInitiated);
+  }
+
+  Future<void> _openUrl(String url, {bool userInitiated = false}) async {
+    final player = state.player;
+    if (player == null) return;
+    await player.open(Media(url));
+    _url = url;
+    _watchdog?.noteStreamOpened(userInitiated: userInitiated);
   }
 
   Future<void> _createPlayer(Channel channel, String url) async {
@@ -96,14 +168,8 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
       isExpanded: state.isExpanded,
     );
 
-    await StreamTuning.apply(
-      player,
-      mode: _ref.read(bufferModeProvider),
-      isLive: true,
-    );
-
-    await player.open(Media(url));
-    _watchdog?.noteStreamOpened();
+    await _applyTuning(player);
+    await _openUrl(url);
   }
 
   void expand() {
@@ -117,6 +183,8 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
   void hide() {
     _watchdog?.dispose();
     _watchdog = null;
+    _quality?.dispose();
+    _quality = null;
     _url = null;
     state.player?.dispose();
     state = const MiniPlayerState();
@@ -129,6 +197,7 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
   @override
   void dispose() {
     _watchdog?.dispose();
+    _quality?.dispose();
     state.player?.dispose();
     super.dispose();
   }

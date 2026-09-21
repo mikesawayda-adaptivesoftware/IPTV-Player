@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local HTTP relay that can freeze a stream on demand.
+"""Local HTTP relay that can freeze or throttle a stream on demand.
 
 The whole point of the stream watchdog is to recover from a stream that stops
 delivering data while the socket stays open - the case that used to hang
@@ -16,6 +16,15 @@ Sits between the player and a real origin stream and applies a timeline:
   drop:<s>   close the connection abruptly, refuse new ones for <s> seconds
              (tests whether FFmpeg's own reconnect absorbs it without the
              watchdog ever needing to fire)
+  throttle:<s>@<kbps>
+             forward bytes for <s> seconds, but paced at <kbps> kilobits per
+             second instead of realtime - a pipe too narrow for the stream's
+             bitrate. This is the case the quality ladder exists for, and it is
+             distinct from every phase above: data keeps arriving, nothing
+             errors, and the stream is never frozen for long enough to look
+             like a freeze - it just rebuffers over and over. Nothing in this
+             file could produce that before, which meant the congestion
+             detector had no end-to-end test.
 
 Two modes:
 
@@ -28,6 +37,8 @@ Two modes:
 
 Usage:
     python tool/stall_proxy.py --upstream <URL> --script relay:25,stall:60
+    python tool/stall_proxy.py --upstream <URL> \
+        --script relay:20,throttle:120@400,relay:120
     # then point the player at http://127.0.0.1:8899/
 """
 
@@ -55,17 +66,34 @@ def log(message):
     print(f"[proxy {time.monotonic() - START:7.1f}s] {message}", flush=True)
 
 
+DEFAULT_THROTTLE_KBPS = 400.0
+
+
 def parse_script(script):
-    """'relay:20,stall:45' -> [('relay', 20.0), ('stall', 45.0)]"""
+    """'relay:20,throttle:45@400' -> [('relay', 20.0, None), ('throttle', 45.0, 400.0)]
+
+    The third element is the target rate in kilobits per second, and is only
+    meaningful for a throttle phase.
+    """
     phases = []
     for part in script.split(","):
         part = part.strip()
         if not part:
             continue
-        kind, _, seconds = part.partition(":")
-        if kind not in ("relay", "stall", "drop"):
+        kind, _, argument = part.partition(":")
+        if kind not in ("relay", "stall", "drop", "throttle"):
             raise ValueError(f"unknown phase {kind!r}")
-        phases.append((kind, float(seconds)))
+
+        seconds, _, rate = argument.partition("@")
+        kbps = None
+        if kind == "throttle":
+            kbps = float(rate) if rate else DEFAULT_THROTTLE_KBPS
+            if kbps <= 0:
+                raise ValueError("throttle rate must be positive")
+        elif rate:
+            raise ValueError(f"{kind!r} does not take a rate")
+
+        phases.append((kind, float(seconds), kbps))
     return phases
 
 
@@ -78,15 +106,15 @@ def stream_elapsed():
 
 
 def phase_at(elapsed):
-    """Which phase the timeline is in at `elapsed` seconds. Past the end of the
+    """(kind, kbps) the timeline is in at `elapsed` seconds. Past the end of the
     timeline the stream relays normally, so recovery has something to recover
     to."""
     cursor = 0.0
-    for kind, duration in TIMELINE:
+    for kind, duration, kbps in TIMELINE:
         if elapsed < cursor + duration:
-            return kind
+            return kind, kbps
         cursor += duration
-    return "relay"
+    return "relay", None
 
 
 def encode(url):
@@ -236,9 +264,11 @@ class Handler(BaseHTTPRequestHandler):
             deadline = time.monotonic()
 
             for offset in range(0, len(data), size):
-                phase = phase_at(stream_elapsed())
+                phase, kbps = phase_at(stream_elapsed())
                 if phase != announced:
-                    log(f"--> {phase.upper()} (served {served // 1024} KiB)")
+                    rate = f" @ {kbps:.0f}kbps" if kbps else ""
+                    log(f"--> {phase.upper()}{rate} "
+                        f"(served {served // 1024} KiB)")
                     announced = phase
 
                 if phase == "drop":
@@ -261,6 +291,16 @@ class Handler(BaseHTTPRequestHandler):
                     log("client went away")
                     return
 
+                if phase == "throttle":
+                    # Pace to the target rate rather than to playback. The
+                    # deadline is re-anchored to now so that leaving the phase
+                    # resumes realtime pacing instead of dumping the whole
+                    # backlog in one burst - the stream simply runs late, which
+                    # is what a narrow pipe actually does.
+                    time.sleep((size * 8) / (kbps * 1000.0))
+                    deadline = time.monotonic()
+                    continue
+
                 deadline += duration / slices
                 sleep_for = deadline - time.monotonic()
                 if sleep_for > 0:
@@ -273,10 +313,12 @@ class Handler(BaseHTTPRequestHandler):
         served = 0
 
         while True:
-            phase = phase_at(stream_elapsed())
+            phase, kbps = phase_at(stream_elapsed())
 
             if phase != announced:
-                log(f"--> {phase.upper()} (served {served // 1024} KiB so far)")
+                rate = f" @ {kbps:.0f}kbps" if kbps else ""
+                log(f"--> {phase.upper()}{rate} "
+                    f"(served {served // 1024} KiB so far)")
                 announced = phase
 
             if phase == "drop":
@@ -308,6 +350,12 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, OSError):
                 log("client went away")
                 return
+
+            if phase == "throttle":
+                # Hold the write rate below the stream's bitrate. Unlike the
+                # endless-TS path this relay is not realtime-paced to begin
+                # with, so throttling is the only pacing here.
+                time.sleep((len(chunk) * 8) / (kbps * 1000.0))
 
 
 def main():

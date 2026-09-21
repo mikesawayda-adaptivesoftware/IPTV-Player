@@ -63,6 +63,15 @@ enum RecoveryStep {
 
   /// Re-open against the provider's other stream format (.ts <-> .m3u8).
   alternateUrl,
+
+  /// Ask the host to drop to a lower-quality version of the stream.
+  ///
+  /// Last resort, and the only rung whose effect outlives the recovery: every
+  /// other step leaves the user exactly where they started, whereas this one
+  /// changes what they are watching until something restores it. The primary
+  /// trigger for degrading is not this rung but the congestion detector - see
+  /// [StreamWatchdog.onCongested].
+  degradeQuality,
 }
 
 class WatchdogStatus {
@@ -135,6 +144,17 @@ class StreamWatchdog {
   /// recovery that was actually working.
   static const Duration defaultVerifyWindow = Duration(seconds: 12);
 
+  /// Rebuffer episodes inside [congestionWindowTicks] that mean the connection
+  /// cannot sustain the current bitrate.
+  ///
+  /// Counting episode *starts* rather than stalled seconds is what separates
+  /// this from the freeze detector: three one-second stalls in a minute is
+  /// congestion, while one forty-second stall is a freeze.
+  static const int congestionEpisodeThreshold = 3;
+
+  /// Rolling window the episode count is measured over.
+  static const int congestionWindowTicks = 45;
+
   /// Ladder order. Cheap and non-disruptive first, so a transient hiccup is
   /// fixed without the user noticing a reload.
   static const List<RecoveryStep> ladder = [
@@ -143,6 +163,7 @@ class StreamWatchdog {
     RecoveryStep.hardReopen,
     RecoveryStep.recreate,
     RecoveryStep.alternateUrl,
+    RecoveryStep.degradeQuality,
   ];
 
   /// Returns the player to watch. Called fresh on every access rather than
@@ -162,6 +183,31 @@ class StreamWatchdog {
   /// Called when [RecoveryStep.alternateUrl] switches formats, so the host can
   /// persist the working URL.
   final void Function(String url)? onUrlChanged;
+
+  /// Whether a lower-quality version of the current stream is available.
+  ///
+  /// Unlike the other availability checks this is dynamic state that the rung
+  /// itself consumes - running a degrade is what eventually makes this return
+  /// false. Returning false is how the host says "already at the floor", which
+  /// makes the rung skip rather than no-op. It must be total; a throw is caught
+  /// and treated as false.
+  final bool Function()? canDegradeQuality;
+
+  /// Drops one step down the quality ladder and re-opens.
+  ///
+  /// MUST await all the way through its `open()` before returning. Every host
+  /// calls [noteStreamOpened] straight after opening, which is only safe while
+  /// `_recovering` is set - and it is only set for the duration of this call.
+  /// An implementation that returns after `setState` and lets a rebuild drive
+  /// the open reintroduces the ladder-rewind bug that `onRecreate` documents.
+  final Future<void> Function()? onDegradeQuality;
+
+  /// Called when the stream is stuttering rather than frozen - repeated short
+  /// rebuffers while data is still arriving.
+  ///
+  /// Separate from the ladder by design: see [_noteCongestion]. Usually wired
+  /// to the same handler as [onDegradeQuality].
+  final Future<void> Function()? onCongested;
 
   final void Function(WatchdogStatus status)? onStatus;
 
@@ -188,6 +234,9 @@ class StreamWatchdog {
     this.onRecreate,
     this.onOpen,
     this.onUrlChanged,
+    this.canDegradeQuality,
+    this.onDegradeQuality,
+    this.onCongested,
     this.onStatus,
     this.verifyWindow = defaultVerifyWindow,
     this.backOffStep = const Duration(seconds: 5),
@@ -207,6 +256,12 @@ class StreamWatchdog {
   int _pausedForCacheTicks = 0;
   int _sinceOpenTicks = 0;
   int _healthyTicks = 0;
+
+  int _tickCount = 0;
+  bool _wasPausedForCache = false;
+
+  /// Tick numbers at which a rebuffer episode began, pruned to the window.
+  final List<int> _rebufferTicks = [];
 
   int _ladderIndex = 0;
   int _cycle = 0;
@@ -245,7 +300,12 @@ class StreamWatchdog {
   /// [RecoveryStep.recreate] and can never climb to the later rungs - observed
   /// live, cycling nudge/reopen/hardReopen/recreate forever and never reaching
   /// the alternate-format fallback.
-  void noteStreamOpened() {
+  ///
+  /// [userInitiated] forces the rewind even mid-recovery. A quality change the
+  /// user picked themselves is not part of the recovery that happens to be in
+  /// flight, and without this its open is swallowed by the guard below and the
+  /// ladder keeps escalating against a stream the user just replaced.
+  void noteStreamOpened({bool userInitiated = false}) {
     _lastPosition = null;
     _lastCacheTime = null;
     _lastBufferFallback = null;
@@ -255,8 +315,10 @@ class StreamWatchdog {
     _sinceOpenTicks = 0;
     _healthyTicks = 0;
     _sawFirstFrame = false;
+    _wasPausedForCache = false;
+    _rebufferTicks.clear();
 
-    if (_recovering) return;
+    if (_recovering && !userInitiated) return;
 
     _ladderIndex = 0;
     _cycle = 0;
@@ -300,6 +362,7 @@ class StreamWatchdog {
     }
 
     _sinceOpenTicks++;
+    _tickCount++;
 
     final position = player.state.position;
     final cacheTime = await StreamTuning.readDouble(player, 'demuxer-cache-time');
@@ -323,6 +386,11 @@ class StreamWatchdog {
     _positionStalledTicks = positionAdvanced ? 0 : _positionStalledTicks + 1;
     _cacheStalledTicks = cacheAdvanced ? 0 : _cacheStalledTicks + 1;
     _pausedForCacheTicks = pausedForCache ? _pausedForCacheTicks + 1 : 0;
+
+    // Checked before the healthy-path return below, because congestion looks
+    // like healthy playback punctuated by short stalls - evaluating it only
+    // during a stall would miss the pattern entirely.
+    if (await _noteCongestion(player, pausedForCache)) return;
 
     if (positionAdvanced && !pausedForCache) {
       _healthyTicks++;
@@ -374,6 +442,84 @@ class StreamWatchdog {
     }
 
     await _escalate(cause);
+  }
+
+  /// Tracks rebuffering and asks the host to lower quality when the stream is
+  /// stuttering rather than frozen. Returns whether it acted.
+  ///
+  /// This is a second trigger, independent of the recovery ladder, and the
+  /// primary way quality actually drops. The ladder answers "the stream is
+  /// broken, repair it" - every rung assumes the endpoint or the pipeline is at
+  /// fault. Repeated short rebuffers are a different hypothesis, that the pipe
+  /// is too narrow for this bitrate, and it is testable long before anything
+  /// freezes. Left to the ladder alone, quality would not move until nudge,
+  /// reopen, hardReopen, recreate and alternateUrl had each been tried and
+  /// given a verification window - roughly a minute of broken video, and
+  /// another minute for every step after that.
+  ///
+  /// Deliberately does not touch `_ladderIndex`. The ladder stays a repair
+  /// ladder; quality is orthogonal to it.
+  Future<bool> _noteCongestion(Player player, bool pausedForCache) async {
+    if (pausedForCache && !_wasPausedForCache) {
+      _rebufferTicks.add(_tickCount);
+    }
+    _wasPausedForCache = pausedForCache;
+    _rebufferTicks
+        .removeWhere((tick) => _tickCount - tick > congestionWindowTicks);
+
+    if (onCongested == null) return false;
+    if (_rebufferTicks.length < congestionEpisodeThreshold) return false;
+    if (!enabled()) return false;
+    if (_suppressUntil != null && DateTime.now().isBefore(_suppressUntil!)) {
+      return false;
+    }
+    if (!_canDegradeSafely()) return false;
+
+    // Data has to actually be arriving for "too narrow" to be the right
+    // diagnosis. A cache-speed of zero means the stream is down rather than
+    // slow, and a lower-bitrate sibling from the same provider would be down
+    // too - so degrading would cost the user quality and fix nothing. Read
+    // here rather than every tick because this point is reached rarely.
+    final cacheSpeed = await StreamTuning.readDouble(player, 'cache-speed');
+    if (cacheSpeed != null && cacheSpeed <= 0) return false;
+
+    print('[watchdog] congestion detected '
+        '(${_rebufferTicks.length} rebuffers in ${congestionWindowTicks}s) '
+        '- lowering quality');
+
+    _rebufferTicks.clear();
+
+    // Held for the whole handler so the host's noteStreamOpened() does not
+    // rewind the ladder, exactly as an escalation does.
+    _recovering = true;
+    try {
+      _emit(const WatchdogStatus(
+        phase: WatchdogPhase.recovering,
+        step: RecoveryStep.degradeQuality,
+        message: 'Lowering quality...',
+      ));
+      await onCongested!();
+    } catch (e) {
+      print('[watchdog] congestion handler threw: $e');
+    } finally {
+      _recovering = false;
+    }
+
+    _resetStallCounters();
+    _suppressUntil = DateTime.now().add(verifyWindow);
+    return true;
+  }
+
+  /// [canDegradeQuality], guarded. It is host code reading provider state and
+  /// can throw from a disposed widget; a throw here would otherwise propagate
+  /// out of an unawaited timer callback and silently lose the escalation.
+  bool _canDegradeSafely() {
+    try {
+      return canDegradeQuality?.call() ?? false;
+    } catch (e) {
+      print('[watchdog] canDegradeQuality threw: $e');
+      return false;
+    }
   }
 
   /// Maps the stall counters onto a freeze cause, or null if nothing has
@@ -458,14 +604,26 @@ class StreamWatchdog {
     }
   }
 
+  /// Whether [step] can do anything right now.
+  ///
+  /// A switch *expression* with no default on purpose: a new rung that nobody
+  /// teaches this method about should be a compile error, not a step that
+  /// silently reports itself available and then throws on a null callback.
   bool _isAvailable(RecoveryStep step) {
-    switch (step) {
-      case RecoveryStep.recreate:
-        return onRecreate != null;
-      case RecoveryStep.alternateUrl:
-        return StreamTuning.alternateUrl(urlRef()) != null;
-      default:
-        return true;
+    try {
+      return switch (step) {
+        RecoveryStep.nudge => true,
+        RecoveryStep.reopen => true,
+        RecoveryStep.hardReopen => true,
+        RecoveryStep.recreate => onRecreate != null,
+        RecoveryStep.alternateUrl =>
+          StreamTuning.alternateUrl(urlRef()) != null,
+        RecoveryStep.degradeQuality =>
+          onDegradeQuality != null && _canDegradeSafely(),
+      };
+    } catch (e) {
+      print('[watchdog] availability check for $step threw: $e');
+      return false;
     }
   }
 
@@ -510,6 +668,9 @@ class StreamWatchdog {
         } else {
           await _open(alternate);
         }
+
+      case RecoveryStep.degradeQuality:
+        await onDegradeQuality!();
     }
   }
 
@@ -544,6 +705,8 @@ class StreamWatchdog {
   }
 
   void _resetStallCounters() {
+    _wasPausedForCache = false;
+    _rebufferTicks.clear();
     _positionStalledTicks = 0;
     _cacheStalledTicks = 0;
     _pausedForCacheTicks = 0;
@@ -558,6 +721,7 @@ class StreamWatchdog {
         RecoveryStep.hardReopen => 'Reconnecting...',
         RecoveryStep.recreate => 'Restarting player...',
         RecoveryStep.alternateUrl => 'Trying alternate stream...',
+        RecoveryStep.degradeQuality => 'Lowering quality...',
       };
 
   void _emit(WatchdogStatus status) {
