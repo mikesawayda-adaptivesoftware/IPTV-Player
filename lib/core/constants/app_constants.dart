@@ -20,6 +20,7 @@ class AppConstants {
   static const String settingEpgUpdateInterval = 'epg_update_interval';
   static const String settingBufferMode = 'buffer_mode';
   static const String settingAutoReconnect = 'auto_reconnect';
+  static const String settingQualityPolicy = 'quality_policy';
 
   // Cache durations
   static const Duration epgCacheDuration = Duration(hours: 12);

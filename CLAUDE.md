@@ -21,6 +21,17 @@ flutter run -d windows          # or macos / linux / android
 flutter build apk --split-per-abi
 ```
 
+**`flutter analyze` exits 1 on a clean tree.** Infos are fatal by default and this repo
+carries ~89 pre-existing ones, so never chain it with `&&` — `flutter analyze && flutter test`
+silently skips the tests. Separate the commands with `;`, or gate on
+`flutter analyze --no-fatal-infos --no-fatal-warnings`, which is the only form that exits 0
+(the lone warning is the pre-existing unused `_selectedChannelId`). Judge a change by whether
+the count moved, not by the exit code.
+
+Also note `flutter test` and `flutter analyze` each run an implicit `pub get`, which rewrites
+`pubspec.lock` against the local SDK. If it turns up dirty and you did not intend a dependency
+change, `git checkout pubspec.lock`.
+
 `deploy.sh` is a commit-and-push helper with an interactive build menu. It force-sets the git
 remote and pushes to `main`. Don't invoke it as part of normal work.
 
@@ -65,7 +76,7 @@ lib/
 | `vodStateProvider` | `StateNotifier<VODState>` | Xtream only; errors out for M3U |
 | `epgStateProvider` | `StateNotifier<Map<String, List<EPGProgram>>>` | XMLTV only |
 | `miniPlayerProvider` | in `ui/widgets/mini_player.dart` | owns its own `Player` |
-| `bufferModeProvider`, `autoReconnectProvider` | in `ui/player/enhanced_video_player.dart` | |
+| `bufferModeProvider`, `autoReconnectProvider`, `qualityPolicyProvider` | in `ui/player/enhanced_video_player.dart` | |
 
 Note: providers live next to their UI in two cases (mini player, buffer settings). That's
 existing convention, not an accident to "fix".
@@ -94,6 +105,8 @@ active audio slot (keys 1–4).
 
 Freeze handling lives in `lib/core/player/` and is wired into **all four** playback
 surfaces: the live player, the VOD player, every multi-view tile, and the mini player.
+Quality degradation lives in the same directory but reaches only the live player, the
+mini player, and (manually) multi-view tiles — see "Quality degradation" below.
 
 **`stream_tuning.dart`** — the *prevention* layer. mpv/FFmpeg properties applied to every
 `Player` before its first `open()` (demuxer options are read at open time, so ordering
@@ -120,6 +133,11 @@ stream cannot fix a wedged decoder.
 Recovery is an escalating ladder, cheapest first:
 `nudge → reopen → hardReopen → recreate → alternateUrl`, each followed by a verification
 window before the next rung is allowed. Sustained healthy playback rewinds the ladder.
+
+**Design rule: the ladder is for repair, not for quality.** `degradeQuality` is its last
+rung, but the *primary* trigger for lowering quality is the congestion detector, not this
+ladder — reaching the last rung takes roughly a minute of broken video, and another minute
+per step after that. See "Quality degradation".
 
 **Design rule: recovery must never latch off.** When the ladder is exhausted it backs off
 and starts over, indefinitely. `WatchdogPhase` has no terminal failure state by design, and
@@ -160,6 +178,138 @@ final v = await native.getProperty('demuxer-cache-time');
 
 Guard every such call — `platform` is `PlatformPlayer?` and is a `WebPlayer` on web.
 
+### Quality degradation
+
+`stream_quality.dart` + `quality_controller.dart`. The point is to trade picture for
+continuity when the pipe is too narrow, rather than reconnecting forever to a bitrate the
+connection cannot carry.
+
+Three mechanisms, and their real value differs enormously:
+
+- **Sibling channels** — providers list the same channel at several bitrates as separate
+  playlist entries (`ESPN FHD` / `ESPN HD` / `ESPN SD`). The only mechanism that genuinely
+  reduces bytes on the wire, so it is the primary one.
+- **HLS variant cap** (`hls-bitrate=min`) — works only when the provider serves a real
+  master playlist, which many Xtream panels do not. Read at open time, so it costs a reopen,
+  and it is a two-position switch (`min`/`max`), not a ladder — FFmpeg exposes no variant
+  list to compute steps from.
+- **Audio only** (`vid=no`) — **saves no bandwidth on a muxed MPEG-TS.** The demuxer still
+  reads the whole transport stream to keep audio current and discards the video packets; only
+  decode work is saved. Never auto-selected, both for that reason and because a black frame
+  with sound is indistinguishable from the freeze it would be fixing. When it *is* selected,
+  the player shows an explicit "Audio only" panel instead of black.
+
+**The grouping heuristics are deliberately biased toward false negatives.** Switching someone
+to the wrong channel is far worse than missing a sibling. Every rule below was either put
+there or corrected by measuring against a real 53,000-channel subscription — do not relax one
+without re-running that measurement (see "Measuring the heuristics"):
+
+- The **normalised base name is part of every group key**, on both the tvg-id and the name
+  path. So a bad `tvg-id` *partitions* rather than poisons: this playlist uses `TS` as a
+  placeholder id on 444 unrelated channels and `01TV.fr` on 18, and even credible ids put
+  `BUNDESLIGA 2` with `BUNDESLIGA 3` and `beIN SPORTS 2` with its FRANCE feed. An earlier
+  version rejected any group whose names disagreed, which also threw away the good half —
+  `US: TNT HD` / `US: TNT SD` / `US: TNT WEST 4K` share an id, and the HD/SD pair is real.
+- **tvg-id is not reliable enough to lead.** Only 14.8% of this playlist has a non-empty one.
+  What it still buys over the name path is that it does not require the same category or the
+  same tier-word position.
+- **Bouquet labels are never tier candidates.** 154 channels here are prefixed `4K:` or `8K:`
+  — the provider is called "World 8K" — and read as tiers, every one outranked the real HD
+  variant of whatever followed. The label stays *in* the base name, though: `|US| ESPN` and
+  `|AR| ESPN` are different languages and must not group.
+- **Timeshift channels are never siblings.** `ITV 2+1` is an hour behind `ITV 2`; switching
+  someone mid-programme is worse than the stutter. 78 channels here carry a `+1`/`+24`.
+- **Superscript tiers are folded to ASCII first.** `SKY SPORTS NEWS ᴴᴰ`, `LA 1 ᵁᴴᴰ ³⁸⁴⁰ᴾ` and
+  `MBC 5 ᴴᴰ` are everywhere in real playlists and a `[A-Za-z0-9]+` tokeniser cannot see them.
+- `HEVC`/`RAW`/`BACKUP`/`ALT` are not tiers and are excluded from ranking; `360` is not in the
+  tier table because `CNN 360` and `Sky Sport 360` are channel names.
+- A group still needs two distinct known tiers, distinct URLs, and at most
+  `maxQualityGroupSize` members.
+
+`test/stream_quality_test.dart` is a table of real adversarial playlist names — add to it
+rather than loosening a rule.
+
+### The on-screen stats overlay
+
+`I` in the live player (or the chart icon in the top bar) opens a diagnostic overlay reading
+libmpv directly: measured resolution, mean video bitrate, audio bitrate, codec/fps,
+`cache-speed` as "arriving", demuxer cache, buffer health and watchdog phase. It is the only
+place the app shows what a stream *actually* is rather than what the provider called it.
+
+Two details that matter:
+
+- Its sampler only runs while the overlay is open — eight property reads a second is not
+  something to do unasked — and it is cancelled in `dispose`.
+- Video bitrate is reported as a mean over the last 12 readings, because the instantaneous
+  value swings with scene complexity and two instantaneous readings cannot be compared. Below
+  eight samples the overlay marks it `(settling)`.
+
+It also keeps a per-quality table of settled measurements for the current channel, ordered by
+measured pixel count rather than by label — which is how you tell whether a provider's `4K`
+entry is really 4K. That table is session-only and clears on a channel change.
+
+### Measuring the heuristics
+
+`tool/quality_report.dart` prints what the grouping actually finds in a real playlist, and the
+near-misses it refused. The rules are conservative enough that the only meaningful question is
+whether they still find anything, and that cannot be answered from unit tests.
+
+```bash
+curl -s '<xtream base>/player_api.php?username=U&password=P&action=get_live_streams' > /tmp/live.json
+```
+
+```bash
+dart run tool/quality_report.dart /tmp/live.json
+```
+
+It synthesises stream URLs from `stream_id` rather than building them for real, so it cannot
+print a subscription credential. It also mirrors the vetting rules and cross-checks its own
+count against `QualityIndex.groupCount` — a `MISMATCH` line means the mirror has drifted from
+the library and the report below it is lying.
+
+For reference, on a 53,198-channel subscription it finds 874 ladders covering 2,077 channels,
+mostly pairs and triples, with none of the cross-country, timeshift or codec false positives
+the earlier rules produced.
+
+**The trigger is a congestion detector, not the recovery ladder.** It rides the watchdog's
+existing 1s tick and counts rebuffer *episodes* (`paused-for-cache` false→true transitions)
+in a rolling window: three one-second stalls in 45s is congestion, one 40s stall is a freeze
+the ladder already owns. Before acting it checks `cache-speed > 0` — on a provider outage
+that reads zero, the sibling from the same provider would be dead too, and degrading would
+cost picture for nothing. It fires `onCongested` directly and **never touches
+`_ladderIndex`**; the ladder stays orthogonal.
+
+Two things the controller must keep doing:
+
+- **Verify the bitrate actually dropped.** Labels lie — "ESPN SD" is frequently the same
+  feed renamed. `video-bitrate` is sampled before and after; an option that did not shrink is
+  blacklisted for the session, or the ladder spends every rung switching between identical
+  streams.
+- **Poll `watchdog.status` for the restore clock, do not subscribe.** `_emit` deduplicates
+  statuses, a manual degrade produces no transition at all, and on a marginal connection the
+  phase flickers healthy↔degraded every few seconds — an edge-triggered timer would be reset
+  constantly and never fire. A degrade soon after a restore doubles the next restore window.
+
+`QualityController.onApply` must await all the way through its `open()`, for the same reason
+`onRecreate` must: `noteStreamOpened()` is only safe to call while `_recovering` is set. A
+*manual* quality change passes `userInitiated: true` through to `noteStreamOpened`, which is
+what stops the ladder escalating against a stream the user has already replaced.
+
+`StreamTuning.apply` carries the quality parameters rather than a separate `applyQuality`,
+because `apply` is the only path that re-applies mpv properties after a `recreate`. Each host
+funnels both buffer mode and quality through a single `_applyTuning`, so the buffer-mode
+`ref.listen` cannot silently re-enable video while audio-only is active.
+
+Note some providers disable the `get.php` M3U export entirely — one returns a bare HTTP
+`884` for it regardless of User-Agent while `player_api.php` answers normally. Add such a
+provider as an **Xtream** source, not an M3U URL.
+
+Multi-view is **manual only**: four independent controllers on one uplink would all degrade
+and reopen at the same moment, and each reopen re-buffers, worsening the congestion that
+triggered it. Automatic degradation there needs cross-slot coordination. The VOD player gets
+nothing — it is handed a bare URL with no `Channel`, so there is nothing to look siblings up
+by.
+
 ### Testing freeze recovery
 
 Unit tests cover the ladder's decision-making with no player attached. To exercise the
@@ -172,6 +322,19 @@ python tool/stall_proxy.py --upstream <any HLS url> --script relay:25,stall:70,r
 # 2. point the diagnostic harness at it
 flutter run -d windows -t lib/dev_harness.dart     --dart-define=URL=http://127.0.0.1:8923/ --dart-define=SECONDS=220
 ```
+
+For congestion rather than a freeze, use the `throttle:<seconds>@<kbps>` phase, which is
+the only one that produces a stream that is *slow* rather than stopped:
+
+```bash
+python tool/stall_proxy.py --upstream <any HLS url> --script relay:20,throttle:120@400,relay:120 --port 8923
+```
+
+The harness logs `in=` (`cache-speed`) against `need=` (`video-bitrate`) plus running
+`rebuffers=` and `degrades=` counts — exactly the detector's inputs and output. Confirm it
+fires during `throttle` and not during `relay`. It wires a stand-in for `QualityController`
+with three notional rungs: without `onCongested` wired the detector returns early and can
+never be observed at all, so do not remove that stub when editing the harness.
 
 `stall:` stops delivering bytes while holding the socket open — the freeze that used to
 hang forever with no error. The harness reads every tuned property back out of libmpv
@@ -233,4 +396,7 @@ the README. EPG comes solely from XMLTV, never from the Xtream EPG endpoints.
 - Dark theme only. Pull colors from `AppTheme` constants, never hardcode.
 - Desktop/mobile split is `context.isDesktop` (width > 900) from `core/utils/extensions.dart`.
 - Player keyboard shortcuts: `Space` play/pause, `↑↓` channel, `M` mute, `F` fullscreen,
-  `R` manual reconnect, `Esc` exit. Multi-view adds `1`–`4` for audio slot.
+  `Q` stream quality, `I` stream stats, `R` manual reconnect, `Esc` exit. Multi-view adds `1`–`4` for audio
+  slot. `R` is a clean slate: it undoes both the alternate-format fallback and any quality
+  degradation. The cheat-sheet strings in `enhanced_video_player.dart` and
+  `settings_screen.dart` have to be kept in sync with the switch by hand.

@@ -11,6 +11,8 @@ StreamWatchdog buildWatchdog({
   bool autoReconnect = true,
   required List<RecoveryStep> performed,
   List<WatchdogStatus>? statuses,
+  bool Function()? canDegradeQuality,
+  Future<void> Function()? onDegradeQuality,
 }) {
   var currentUrl = url;
   return StreamWatchdog(
@@ -21,6 +23,8 @@ StreamWatchdog buildWatchdog({
     backOffStep: Duration.zero,
     maxBackOff: Duration.zero,
     onRecreate: canRecreate ? (_) async => performed.add(RecoveryStep.recreate) : null,
+    canDegradeQuality: canDegradeQuality,
+    onDegradeQuality: onDegradeQuality,
     onUrlChanged: (value) => currentUrl = value,
     onStatus: (status) {
       statuses?.add(status);
@@ -234,6 +238,161 @@ void main() {
           .toList();
       expect(cycles.length, greaterThan(1));
       expect(cycles, orderedEquals(List.generate(cycles.length, (i) => i + 1)));
+
+      watchdog.dispose();
+    });
+
+    test('drops quality as the last rung when a lower one exists', () async {
+      final performed = <RecoveryStep>[];
+      final watchdog = buildWatchdog(
+        performed: performed,
+        canDegradeQuality: () => true,
+        onDegradeQuality: () async {},
+      );
+
+      for (var i = 0; i < 6; i++) {
+        await watchdog.forceRecovery(userInitiated: false);
+      }
+
+      expect(performed, contains(RecoveryStep.degradeQuality));
+      expect(
+        performed.indexOf(RecoveryStep.degradeQuality),
+        greaterThan(performed.indexOf(RecoveryStep.alternateUrl)),
+        reason: 'quality is the last resort, after the repair steps',
+      );
+
+      watchdog.dispose();
+    });
+
+    test('skips the quality step when already at the lowest available',
+        () async {
+      final performed = <RecoveryStep>[];
+      final watchdog = buildWatchdog(
+        performed: performed,
+        canDegradeQuality: () => false,
+        onDegradeQuality: () async {},
+      );
+
+      for (var i = 0; i < 8; i++) {
+        await watchdog.forceRecovery(userInitiated: false);
+      }
+
+      expect(performed, isNot(contains(RecoveryStep.degradeQuality)));
+
+      watchdog.dispose();
+    });
+
+    // The never-latch-off invariant, re-checked for the rung that can run out.
+    // Unlike every other step, `degradeQuality` becomes permanently unavailable
+    // once the bottom of the quality ladder is reached - so this is the case
+    // where a "gave up" state would most plausibly creep back in.
+    test('keeps cycling after quality bottoms out', () async {
+      final statuses = <WatchdogStatus>[];
+      final performed = <RecoveryStep>[];
+
+      // Attempts are counted off the status stream, not off onDegradeQuality:
+      // these tests run with no player attached, so _perform returns before any
+      // step body executes. Two steps of headroom, then the floor.
+      int attempts() => statuses
+          .where((s) =>
+              s.phase == WatchdogPhase.recovering &&
+              s.step == RecoveryStep.degradeQuality)
+          .length;
+
+      final watchdog = buildWatchdog(
+        performed: performed,
+        statuses: statuses,
+        canDegradeQuality: () => attempts() < 2,
+        onDegradeQuality: () async {},
+      );
+
+      for (var i = 0; i < 30; i++) {
+        await watchdog.forceRecovery(userInitiated: false);
+      }
+
+      expect(attempts(), 2, reason: 'the quality ladder should be exhausted');
+
+      final cycles = statuses
+          .where((s) => s.phase == WatchdogPhase.backingOff)
+          .map((s) => s.cycle)
+          .toList();
+      expect(cycles.length, greaterThan(1));
+      expect(cycles, orderedEquals(List.generate(cycles.length, (i) => i + 1)));
+
+      watchdog.dispose();
+    });
+
+    // canDegradeQuality is host code reading provider state, so it can throw
+    // from a disposed widget. The availability check runs inside an unawaited
+    // timer callback; an escaping exception there would silently drop the
+    // escalation instead of falling through to the next rung.
+    test('treats a throwing availability check as unavailable', () async {
+      final statuses = <WatchdogStatus>[];
+      final performed = <RecoveryStep>[];
+      final watchdog = buildWatchdog(
+        performed: performed,
+        statuses: statuses,
+        canDegradeQuality: () => throw StateError('disposed'),
+        onDegradeQuality: () async {},
+      );
+
+      for (var i = 0; i < 12; i++) {
+        await watchdog.forceRecovery(userInitiated: false);
+      }
+
+      expect(performed, isNot(contains(RecoveryStep.degradeQuality)));
+      expect(
+        statuses.where((s) => s.phase == WatchdogPhase.backingOff),
+        isNotEmpty,
+        reason: 'a throwing check must not stall the ladder',
+      );
+
+      watchdog.dispose();
+    });
+
+    // A quality change the user picked is not part of whatever recovery happens
+    // to be in flight. Without the userInitiated escape hatch its open is
+    // swallowed by the _recovering guard and the ladder carries on escalating
+    // against a stream the user has already replaced.
+    test('a user-initiated open rewinds the ladder even mid-recovery',
+        () async {
+      final performed = <RecoveryStep>[];
+      late StreamWatchdog watchdog;
+      var rewound = false;
+
+      watchdog = StreamWatchdog(
+        playerRef: () => null,
+        urlRef: () => 'http://example.com/live/u/p/1.ts',
+        enabled: () => true,
+        verifyWindow: Duration.zero,
+        backOffStep: Duration.zero,
+        maxBackOff: Duration.zero,
+        onStatus: (status) {
+          if (status.phase != WatchdogPhase.recovering ||
+              status.step == null) {
+            return;
+          }
+          performed.add(status.step!);
+          // This callback runs from inside the escalation, so _recovering is
+          // set - which is exactly the state the userInitiated flag exists to
+          // punch through. Stands in for the user picking a different quality
+          // while the watchdog happens to be mid-recovery.
+          if (!rewound && status.step == RecoveryStep.hardReopen) {
+            rewound = true;
+            watchdog.noteStreamOpened(userInitiated: true);
+          }
+        },
+      );
+
+      // nudge, reopen, hardReopen - the last of which rewinds.
+      for (var i = 0; i < 3; i++) {
+        await watchdog.forceRecovery(userInitiated: false);
+      }
+      expect(rewound, isTrue);
+      performed.clear();
+
+      await watchdog.forceRecovery(userInitiated: false);
+      expect(performed.first, RecoveryStep.nudge);
 
       watchdog.dispose();
     });

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_picker/file_picker.dart';
 
+import '../../core/constants/app_constants.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/playlist_source.dart';
 import '../../data/services/storage_service.dart';
@@ -169,6 +170,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Widget _buildPlaybackSettings() {
     final bufferMode = ref.watch(bufferModeProvider);
     final autoReconnect = ref.watch(autoReconnectProvider);
+    final qualityPolicy = ref.watch(qualityPolicyProvider);
     final storage = StorageService();
 
     return Card(
@@ -209,6 +211,45 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               dense: true,
             )),
             
+            const Divider(height: 32),
+
+            // Stream Quality
+            const Text(
+              'Stream Quality',
+              style: TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Many providers carry the same channel at several bitrates. When '
+              'the connection cannot keep up, the player can switch to a '
+              'smaller one instead of stuttering. Press Q in the player to '
+              'choose by hand at any time.',
+              style: TextStyle(fontSize: 12, color: AppTheme.textMuted),
+            ),
+            const SizedBox(height: 12),
+
+            ...QualityPolicy.values.map((policy) => RadioListTile<QualityPolicy>(
+              title: Text(policy.label),
+              subtitle: Text(
+                policy.description,
+                style: const TextStyle(fontSize: 12),
+              ),
+              value: policy,
+              groupValue: qualityPolicy,
+              onChanged: (value) {
+                if (value != null) {
+                  ref.read(qualityPolicyProvider.notifier).state = value;
+                  storage.saveSetting(
+                    AppConstants.settingQualityPolicy,
+                    value.index,
+                  );
+                }
+              },
+              activeColor: AppTheme.primaryColor,
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+            )),
+
             const Divider(height: 32),
             
             // Auto Reconnect
@@ -252,7 +293,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'R = Manual reconnect • Space = Play/Pause • ↑↓ = Change channel • M = Mute • F = Fullscreen',
+                          'R = Manual reconnect • Q = Stream quality • I = Stream stats • Space = Play/Pause • ↑↓ = Change channel • M = Mute • F = Fullscreen',
                           style: TextStyle(fontSize: 11, color: AppTheme.textMuted),
                         ),
                       ],

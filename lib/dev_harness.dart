@@ -72,6 +72,25 @@ class _HarnessAppState extends State<_HarnessApp> {
       enabled: () => true,
       onRecreate: _recreate,
       onUrlChanged: (url) => _url = url,
+      // Stand-in for QualityController. The harness has no playlist, so there
+      // are no real siblings to switch to - but without these wired the
+      // congestion detector returns early on `onCongested == null` and could
+      // never be observed firing at all. Three notional rungs, so both the
+      // detector and the last-resort ladder rung get exercised, and then the
+      // floor, so the never-latch-off behaviour shows up in the log too.
+      canDegradeQuality: () => _rungsLeft > 0,
+      onDegradeQuality: () async {
+        _rungsLeft--;
+        _degrades++;
+        log('QUALITY   degrade via ladder rung at t=${_elapsed}s '
+            '($_rungsLeft rungs left)');
+      },
+      onCongested: () async {
+        _rungsLeft--;
+        _degrades++;
+        log('QUALITY   degrade via congestion detector at t=${_elapsed}s '
+            '($_rungsLeft rungs left)');
+      },
       onStatus: (s) => log('WATCHDOG  ${s.phase.name.toUpperCase()}'
           '${s.cause != null ? ' cause=${s.cause!.name}' : ''}'
           '${s.step != null ? ' step=${s.step!.name}' : ''}'
@@ -138,6 +157,11 @@ class _HarnessAppState extends State<_HarnessApp> {
       'framedrop': 'vo',
       'stream-lavf-o': null, // just prove it is non-empty
       'user-agent': 'IPTV Player/1.0',
+      'hls-bitrate': 'max',
+      // `vid` reads back the *selected track id*, not the value that was set,
+      // so only prove it is readable. A literal `no` here would mean video is
+      // switched off, which is the audio-only case.
+      'vid': null,
     };
 
     var failures = 0;
@@ -161,10 +185,27 @@ class _HarnessAppState extends State<_HarnessApp> {
       'demuxer-cache-time',
       'paused-for-cache',
       'core-idle',
+      // The congestion detector's inputs. cache-speed is what separates "the
+      // pipe is too narrow" from "the stream is down": on an outage it goes to
+      // zero, and degrading quality would then cost picture for nothing.
+      'cache-speed',
+      'video-bitrate',
     ]) {
       final value = await StreamTuning.readProperty(_player!, property);
       log('  ${value != null ? "OK  " : "NULL"} $property = ${value ?? "<null>"}');
     }
+  }
+
+  int _rebuffers = 0;
+  bool _wasPausedForCache = false;
+  int _rungsLeft = 3;
+  int _degrades = 0;
+
+  /// Bytes per second as kilobits per second, which is how stream bitrates are
+  /// normally quoted - so `in` and `need` are directly comparable.
+  static String _kbps(double? bytesPerSecond) {
+    if (bytesPerSecond == null) return '-';
+    return '${(bytesPerSecond * 8 / 1000).round()}k';
   }
 
   void _sample() {
@@ -186,14 +227,28 @@ class _HarnessAppState extends State<_HarnessApp> {
       final cache = await StreamTuning.readProperty(player, 'demuxer-cache-time');
       final pausedForCache =
           await StreamTuning.readProperty(player, 'paused-for-cache');
+      final cacheSpeed = await StreamTuning.readDouble(player, 'cache-speed');
+      final videoBitrate =
+          await StreamTuning.readDouble(player, 'video-bitrate');
+
+      // Rebuffer *episodes*, counted the same way the watchdog counts them -
+      // starts, not stalled seconds. Three in the rolling window is what trips
+      // a quality drop, so this is the number to watch during a throttle phase.
+      final nowPaused = pausedForCache == 'yes';
+      if (nowPaused && !_wasPausedForCache) _rebuffers++;
+      _wasPausedForCache = nowPaused;
 
       log('t=${_elapsed.toString().padLeft(3)}s  '
           'pos=${player.state.position.inMilliseconds.toString().padLeft(7)}ms  '
           'buf=${player.state.buffer.inSeconds.toString().padLeft(3)}s  '
           'cacheTime=${(cache ?? "-").padLeft(8)}  '
+          'in=${_kbps(cacheSpeed).padLeft(9)}  '
+          'need=${_kbps(videoBitrate == null ? null : videoBitrate / 8).padLeft(9)}  '
           'playing=${player.state.playing}  '
           'buffering=${player.state.buffering}  '
-          'pausedForCache=${pausedForCache ?? "-"}');
+          'pausedForCache=${pausedForCache ?? "-"}  '
+          'rebuffers=$_rebuffers  '
+          'degrades=$_degrades');
 
       if (mounted) setState(() {});
     });

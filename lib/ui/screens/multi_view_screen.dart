@@ -6,12 +6,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../../core/player/quality_controller.dart';
+import '../../core/player/stream_quality.dart';
 import '../../core/player/stream_tuning.dart';
 import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/channel.dart';
 import '../../providers/playlist_provider.dart';
-import '../player/enhanced_video_player.dart' show autoReconnectProvider, bufferModeProvider;
+import '../player/enhanced_video_player.dart'
+    show autoReconnectProvider, bufferModeProvider;
 
 class MultiViewScreen extends ConsumerStatefulWidget {
   final List<Channel> initialChannels;
@@ -66,6 +69,25 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
     slot.url = channel.streamUrl;
     slot.isLoading = true;
     slot.error = null;
+
+    slot.quality = QualityController(
+      playerRef: () => slot.player,
+      watchdogRef: () => slot.watchdog,
+      onApply: (option, {required userInitiated}) =>
+          _applySlotQuality(slotIndex, option, userInitiated: userInitiated),
+      // Manual only here - see _PlayerSlot.quality.
+      autoEnabled: () => false,
+      onChanged: () {
+        if (mounted) setState(() {});
+      },
+    )..setOptions(
+        ref.read(channelStateProvider).qualityIndex.optionsFor(
+              channelId: channel.id,
+              sourceLabel: channel.name,
+              currentUrl: channel.streamUrl,
+            ),
+      );
+
     setState(() {});
 
     await _createSlotPlayer(slotIndex, slot.url!);
@@ -108,11 +130,7 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
     slot.controller = VideoController(player);
     if (mounted) setState(() {});
 
-    await StreamTuning.apply(
-      player,
-      mode: ref.read(bufferModeProvider),
-      isLive: true,
-    );
+    await _applySlotTuning(slotIndex, player);
 
     slot.subscriptions.add(player.stream.buffering.listen((buffering) {
       if (mounted) setState(() => slot.isLoading = buffering);
@@ -136,6 +154,7 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
 
     try {
       await player.open(Media(url));
+      slot.url = url;
       slot.watchdog?.noteStreamOpened();
     } catch (e) {
       if (mounted) {
@@ -144,6 +163,106 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
           slot.isLoading = false;
         });
       }
+    }
+  }
+
+  /// The one place this slot's mpv tuning is applied, so buffer mode and
+  /// quality cannot overwrite one another.
+  Future<void> _applySlotTuning(int slotIndex, Player player) {
+    final option = _slots[slotIndex].quality?.current;
+    return StreamTuning.apply(
+      player,
+      mode: ref.read(bufferModeProvider),
+      isLive: true,
+      hlsBitrate: option?.hlsBitrate ?? 'max',
+      videoDisabled: option?.videoDisabled ?? false,
+    );
+  }
+
+  /// [QualityApply] for a slot.
+  Future<void> _applySlotQuality(
+    int slotIndex,
+    QualityOption option, {
+    required bool userInitiated,
+  }) async {
+    final slot = _slots[slotIndex];
+    final player = slot.player;
+    if (player == null) return;
+
+    // `hls-bitrate` and `vid` are read when the stream is opened.
+    await _applySlotTuning(slotIndex, player);
+    try {
+      await player.open(Media(option.url));
+      slot.url = option.url;
+      slot.watchdog?.noteStreamOpened(userInitiated: userInitiated);
+    } catch (e) {
+      if (mounted) {
+        setState(() => slot.error = StreamTuning.redactUrl(e.toString()));
+      }
+    }
+  }
+
+  Future<void> _showSlotQualityPicker(int slotIndex) async {
+    final quality = _slots[slotIndex].quality;
+    final options = quality?.options ?? const <QualityOption>[];
+    if (quality == null || options.length < 2) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('No other quality is available for this channel'),
+        ));
+      }
+      return;
+    }
+
+    final current = quality.current;
+    final chosen = await showModalBottomSheet<QualityOption>(
+      context: context,
+      backgroundColor: AppTheme.surfaceColor,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+              child: Row(
+                children: [
+                  const Icon(Icons.tune, size: 18, color: AppTheme.textSecondary),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Quality - slot ${slotIndex + 1}',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final option in options)
+                    ListTile(
+                      dense: true,
+                      title: Text(option.label),
+                      trailing: option == current
+                          ? const Icon(
+                              Icons.check,
+                              size: 18,
+                              color: AppTheme.primaryColor,
+                            )
+                          : null,
+                      onTap: () => Navigator.of(sheetContext).pop(option),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+
+    if (chosen != null && chosen != current) {
+      await quality.selectManual(chosen);
     }
   }
 
@@ -420,7 +539,28 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
                     ),
                     
                     const SizedBox(width: 8),
-                    
+
+                    // Quality
+                    GestureDetector(
+                      onTap: () => _showSlotQualityPicker(index),
+                      child: Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Icon(
+                          Icons.tune,
+                          color: (slot.quality?.isDegraded ?? false)
+                              ? AppTheme.warningColor
+                              : Colors.white,
+                          size: 14,
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(width: 8),
+
                     // Remove button
                     GestureDetector(
                       onTap: () => _removeChannelFromSlot(index),
@@ -518,6 +658,16 @@ class _PlayerSlot {
   WatchdogStatus status =
       const WatchdogStatus(phase: WatchdogPhase.healthy, message: '');
 
+  /// Manual quality selection for this tile.
+  ///
+  /// Never started, and never wired to this slot's watchdog, so nothing here
+  /// happens automatically. Four tiles share one uplink: four independent
+  /// controllers observing the same congestion would all degrade and re-open at
+  /// once, and each re-open re-buffers, which worsens the very congestion that
+  /// triggered it. Automatic degradation here needs cross-slot coordination,
+  /// which is its own change.
+  QualityController? quality;
+
   final List<StreamSubscription> subscriptions = [];
 
   /// Disposes the player only, leaving the watchdog running - this is what the
@@ -542,6 +692,8 @@ class _PlayerSlot {
   void dispose() {
     watchdog?.dispose();
     watchdog = null;
+    quality?.dispose();
+    quality = null;
     disposePlayer();
     isLoading = false;
     error = null;

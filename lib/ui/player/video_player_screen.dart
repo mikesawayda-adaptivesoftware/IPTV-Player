@@ -112,6 +112,11 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
     // Reopen, hard reopen and the alternate-format fallback all still apply,
     // and for seekable VOD the nudge step is a seek, which flushes the decoder
     // and covers most of what recreate would have.
+    //
+    // Nor is the quality step: this screen is handed a bare stream URL for a
+    // VODItem, with no Channel identity, so there is nothing to look siblings
+    // up by. Omitting onDegradeQuality is what makes that rung report itself
+    // unavailable and be skipped.
     _watchdog = StreamWatchdog(
       playerRef: () => _player,
       urlRef: () => _streamUrl,
