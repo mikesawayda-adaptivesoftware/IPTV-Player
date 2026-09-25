@@ -10,6 +10,7 @@ import '../../core/platform/tv_platform.dart';
 import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/channel.dart';
+import 'tv_focusable.dart';
 import '../../providers/playlist_provider.dart';
 import '../player/enhanced_video_player.dart';
 
@@ -243,7 +244,9 @@ class MiniPlayerWidget extends ConsumerWidget {
     return Positioned(
       right: 16,
       bottom: 16,
-      child: GestureDetector(
+      child: TvFocusable(
+        borderRadius: BorderRadius.circular(12),
+        semanticLabel: 'Expand player',
         onTap: () => ref.read(miniPlayerProvider.notifier).expand(),
         child: Container(
           width: 320,
@@ -316,8 +319,14 @@ class MiniPlayerWidget extends ConsumerWidget {
                           size: 20,
                         ),
                         onPressed: () => ref.read(miniPlayerProvider.notifier).togglePlayPause(),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                        // Constraints were stripped entirely, giving ~20dp
+                        // targets - unusable with a remote focus ring, and
+                        // under the 48dp minimum for touch too.
+                        padding: const EdgeInsets.all(8),
+                        constraints: const BoxConstraints(
+                          minWidth: 40,
+                          minHeight: 40,
+                        ),
                       ),
                       
                       const SizedBox(width: 8),
@@ -326,8 +335,14 @@ class MiniPlayerWidget extends ConsumerWidget {
                       IconButton(
                         icon: const Icon(Icons.fullscreen, color: Colors.white, size: 20),
                         onPressed: () => ref.read(miniPlayerProvider.notifier).expand(),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                        // Constraints were stripped entirely, giving ~20dp
+                        // targets - unusable with a remote focus ring, and
+                        // under the 48dp minimum for touch too.
+                        padding: const EdgeInsets.all(8),
+                        constraints: const BoxConstraints(
+                          minWidth: 40,
+                          minHeight: 40,
+                        ),
                       ),
                       
                       const SizedBox(width: 8),
@@ -336,8 +351,14 @@ class MiniPlayerWidget extends ConsumerWidget {
                       IconButton(
                         icon: const Icon(Icons.close, color: Colors.white, size: 20),
                         onPressed: () => ref.read(miniPlayerProvider.notifier).hide(),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                        // Constraints were stripped entirely, giving ~20dp
+                        // targets - unusable with a remote focus ring, and
+                        // under the 48dp minimum for touch too.
+                        padding: const EdgeInsets.all(8),
+                        constraints: const BoxConstraints(
+                          minWidth: 40,
+                          minHeight: 40,
+                        ),
                       ),
                     ],
                   ),
@@ -372,12 +393,27 @@ class MiniPlayerWidget extends ConsumerWidget {
   }
 
   Widget _buildExpandedPlayer(BuildContext context, WidgetRef ref, MiniPlayerState state) {
+    // PopScope rather than pushing a real route.
+    //
+    // The expanded player is drawn inside HomeScreen's body Stack, so Android's
+    // Back button was popping HomeScreen itself - exiting the app in the middle
+    // of playback. PopScope registers against the enclosing route, so while
+    // this subtree is mounted it intercepts that pop and minimizes instead,
+    // which is the behaviour a remote's Back button needs. Route-ifying the
+    // player would also work but would move ownership of the Player instance,
+    // and this is the whole fix in five lines.
     return Positioned.fill(
-      child: EnhancedVideoPlayer(
-        channel: state.channel!,
-        isLive: true,
-        onClose: () => ref.read(miniPlayerProvider.notifier).hide(),
-        onMinimize: () => ref.read(miniPlayerProvider.notifier).minimize(),
+      child: PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) ref.read(miniPlayerProvider.notifier).minimize();
+        },
+        child: EnhancedVideoPlayer(
+          channel: state.channel!,
+          isLive: true,
+          onClose: () => ref.read(miniPlayerProvider.notifier).hide(),
+          onMinimize: () => ref.read(miniPlayerProvider.notifier).minimize(),
+        ),
       ),
     );
   }

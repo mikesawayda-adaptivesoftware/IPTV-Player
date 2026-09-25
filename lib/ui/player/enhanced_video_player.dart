@@ -16,6 +16,7 @@ import '../../core/theme/app_theme.dart';
 import '../../data/models/channel.dart';
 import '../../data/services/storage_service.dart';
 import '../../providers/playlist_provider.dart';
+import '../widgets/tv_focusable.dart';
 
 // BufferMode moved to core/player/stream_tuning.dart so the tuning layer can
 // use it without depending on the UI. Re-exported here because the settings
@@ -93,6 +94,14 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
 
   double _bufferHealth = 0.0;
 
+  /// Extra inset for the player's floating overlays on TV.
+  ///
+  /// The player's Stack is deliberately full-bleed: the overscan injected into
+  /// MediaQuery in app.dart is honoured by SafeArea, and the video itself must
+  /// not be letterboxed. So anything positioned absolutely inside this Stack
+  /// has to clear the overscan itself, or it lands in the strip a TV crops.
+  static double get _overlayInset => kIsTv ? 48.0 : 0.0;
+
   /// Diagnostic overlay, toggled with `I`. Off by default, and its sampler only
   /// runs while it is on - it reads eight mpv properties a second, which is not
   /// something to do behind the user's back.
@@ -155,6 +164,9 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
       // playing, so quality drops in about ten seconds rather than after the
       // whole repair ladder has failed.
       onCongested: _quality.degrade,
+      reconnectHint: kIsTv
+          ? 'Stream frozen - press OK to reconnect'
+          : 'Stream frozen - tap to reconnect',
       onStatus: _onWatchdogStatus,
     );
 
@@ -553,20 +565,66 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     await _watchdog.forceRecovery();
   }
 
-  void _handleKeyEvent(KeyEvent event) {
-    if (event is! KeyDownEvent) return;
+  /// Keys the player claims for itself, regardless of what has focus.
+  ///
+  /// Mounted on a [Focus] that cannot itself be focused (see [build]), so key
+  /// events reach it by bubbling up the ancestor chain from whatever control
+  /// currently holds focus. Anything not claimed here returns
+  /// [KeyEventResult.ignored] and falls through to Flutter's directional
+  /// traversal - which is what moves focus between the on-screen buttons - and
+  /// then to the platform, which is how the remote's Back button still works.
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    // Both edges of a claimed key must be consumed. If only key-down is taken,
+    // the matching key-up is redispatched to the Android activity - and Back
+    // fires on ACTION_UP, so the activity would pop out from under us.
+    if (event is KeyRepeatEvent) return KeyEventResult.handled;
+    if (event is! KeyDownEvent) {
+      if (_swallowSelectUp && event.logicalKey == LogicalKeyboardKey.select) {
+        _swallowSelectUp = false;
+        return KeyEventResult.handled;
+      }
+      return _claimedKeys.contains(event.logicalKey)
+          ? KeyEventResult.handled
+          : KeyEventResult.ignored;
+    }
+
+    if (!_claimedKeys.contains(event.logicalKey)) {
+      // Not ours. On TV a directional press while the controls are hidden
+      // should wake them before traversal moves focus, so the user is never
+      // navigating an invisible UI.
+      if (!_showControls && _isDirectional(event.logicalKey)) {
+        final wasHidden = !_showControls;
+        _showControlsTemporarily();
+        // Select on a control nobody can see would activate something at
+        // random, so the first press only wakes the UI. Latched rather than
+        // re-tested on key-up, because by then _showControls is already true
+        // and the up event would leak to the platform unmatched.
+        if (wasHidden && event.logicalKey == LogicalKeyboardKey.select) {
+          _swallowSelectUp = true;
+          return KeyEventResult.handled;
+        }
+      }
+      return KeyEventResult.ignored;
+    }
 
     final player = _player;
     _showControlsTemporarily();
 
     switch (event.logicalKey) {
       case LogicalKeyboardKey.space:
+      case LogicalKeyboardKey.mediaPlayPause:
+      case LogicalKeyboardKey.mediaPlay:
+      case LogicalKeyboardKey.mediaPause:
         player?.playOrPause();
+      case LogicalKeyboardKey.mediaStop:
+        player?.pause();
       case LogicalKeyboardKey.arrowUp:
       case LogicalKeyboardKey.channelUp:
+      case LogicalKeyboardKey.mediaTrackPrevious:
         _previousChannel();
       case LogicalKeyboardKey.arrowDown:
       case LogicalKeyboardKey.channelDown:
+      case LogicalKeyboardKey.mediaTrackNext:
         _nextChannel();
       case LogicalKeyboardKey.arrowLeft:
         if (!widget.isLive && player != null) {
@@ -593,7 +651,49 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
           widget.onClose?.call();
         }
     }
+
+    return KeyEventResult.handled;
   }
+
+  /// Set when a Select press was spent waking the controls, so its key-up is
+  /// consumed too rather than leaking to the platform unmatched.
+  bool _swallowSelectUp = false;
+
+  /// Keys handled by [_handleKeyEvent], as a set so key-up can be consumed
+  /// symmetrically without duplicating the switch.
+  ///
+  /// Up/Down are claimed unconditionally: channel surfing is the most-used
+  /// interaction on a live TV player and must not cost two presses to reveal
+  /// the controls first. Left/Right are claimed for VOD seeking only, leaving
+  /// them free for horizontal focus traversal on a live stream.
+  Set<LogicalKeyboardKey> get _claimedKeys => {
+        LogicalKeyboardKey.space,
+        LogicalKeyboardKey.mediaPlayPause,
+        LogicalKeyboardKey.mediaPlay,
+        LogicalKeyboardKey.mediaPause,
+        LogicalKeyboardKey.mediaStop,
+        LogicalKeyboardKey.arrowUp,
+        LogicalKeyboardKey.channelUp,
+        LogicalKeyboardKey.mediaTrackPrevious,
+        LogicalKeyboardKey.arrowDown,
+        LogicalKeyboardKey.channelDown,
+        LogicalKeyboardKey.mediaTrackNext,
+        if (!widget.isLive) LogicalKeyboardKey.arrowLeft,
+        if (!widget.isLive) LogicalKeyboardKey.arrowRight,
+        LogicalKeyboardKey.keyM,
+        if (!kIsTv) LogicalKeyboardKey.keyF,
+        LogicalKeyboardKey.keyI,
+        LogicalKeyboardKey.keyQ,
+        LogicalKeyboardKey.keyR,
+        LogicalKeyboardKey.escape,
+      };
+
+  static bool _isDirectional(LogicalKeyboardKey key) =>
+      key == LogicalKeyboardKey.arrowLeft ||
+      key == LogicalKeyboardKey.arrowRight ||
+      key == LogicalKeyboardKey.arrowUp ||
+      key == LogicalKeyboardKey.arrowDown ||
+      key == LogicalKeyboardKey.select;
 
   // ==========================================================================
   // Build
@@ -612,12 +712,27 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
 
     final controller = _controller;
 
-    return KeyboardListener(
+    // canRequestFocus/skipTraversal false is the whole point. This used to be
+    // a KeyboardListener with autofocus:true, which made a full-screen node the
+    // scope's focusedChild - and directional traversal filters candidates to
+    // those beyond the focused node's edge, so with a full-screen rect the
+    // candidate set was empty in all four directions and focus could never
+    // reach any control, on a remote or on a desktop keyboard. As a
+    // non-focusable interceptor it still receives every key by bubbling, while
+    // the real focusedChild is a button with a real rect that traversal can
+    // move away from.
+    return Focus(
       focusNode: _focusNode,
-      autofocus: true,
+      canRequestFocus: false,
+      skipTraversal: true,
       onKeyEvent: _handleKeyEvent,
       child: Scaffold(
         backgroundColor: Colors.black,
+        // Stays a plain GestureDetector: this is the whole-screen
+        // tap-to-reveal affordance, not a control. Making it focusable would
+        // put a full-screen node in the traversal order, which is exactly the
+        // bug the Focus interceptor above was introduced to fix. The remote
+        // equivalent is the directional-wake rule in _handleKeyEvent.
         body: GestureDetector(
           onTap: _showControlsTemporarily,
           child: Stack(
@@ -649,7 +764,18 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
 
               if (_errorMessage != null) _buildErrorView(),
 
-              if (_showControls && _errorMessage == null) _buildControls(),
+              // Mounted whenever there is no error, not only while visible.
+              // _buildControls already fades itself with AnimatedOpacity, so
+              // the old `_showControls &&` guard meant that animation never ran
+              // in its fade-out direction - and, worse on a remote, the focused
+              // button left the tree entirely when the hide timer fired.
+              // IgnorePointer keeps an invisible control from being clicked;
+              // Select while hidden is swallowed in _handleKeyEvent.
+              if (_errorMessage == null)
+                IgnorePointer(
+                  ignoring: !_showControls,
+                  child: _buildControls(),
+                ),
 
               if (_showControls && _errorMessage == null && widget.isLive)
                 _buildBufferHealthIndicator(),
@@ -698,11 +824,13 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
   }
 
   Widget _buildBufferingIndicator() {
-    return const Positioned(
-      top: 100,
+    return Positioned(
+      top: 100 + _overlayInset,
       left: 0,
       right: 0,
-      child: Center(
+      // The subtree stays const even though Positioned cannot be, now that its
+      // offset depends on the TV overlay inset.
+      child: const Center(
         child: _Pill(
           color: Colors.black54,
           child: Row(
@@ -760,12 +888,14 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     }
 
     return Positioned(
-      top: 100,
+      top: 100 + _overlayInset,
       left: 0,
       right: 0,
       child: Center(
-        child: GestureDetector(
+        child: TvFocusable(
           onTap: _manualReconnect,
+          borderRadius: BorderRadius.circular(20),
+          semanticLabel: 'Reconnect',
           child: _Pill(
             color: color.withValues(alpha: 0.9),
             child: Row(
@@ -881,10 +1011,12 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     if (option == null) return const SizedBox.shrink();
 
     return Positioned(
-      top: 108,
-      right: 16,
-      child: GestureDetector(
+      top: 108 + _overlayInset,
+      right: 16 + _overlayInset,
+      child: TvFocusable(
         onTap: _showQualityPicker,
+        borderRadius: BorderRadius.circular(4),
+        semanticLabel: 'Stream quality',
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           decoration: BoxDecoration(
@@ -1049,8 +1181,8 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
       ..sort((a, b) => b.value.pixels.compareTo(a.value.pixels));
 
     return Positioned(
-      left: 12,
-      top: 72,
+      left: 12 + _overlayInset,
+      top: 72 + _overlayInset,
       child: Container(
         width: 320,
         padding: const EdgeInsets.all(12),
@@ -1078,9 +1210,16 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
                   ),
                 ),
                 const Spacer(),
-                GestureDetector(
+                TvFocusable(
                   onTap: _toggleStats,
-                  child: const Icon(Icons.close, size: 13, color: Colors.white54),
+                  borderRadius: BorderRadius.circular(4),
+                  semanticLabel: 'Close stats',
+                  child: const Padding(
+                    // Was a bare 13px icon - far too small to aim a focus ring
+                    // at, let alone hit.
+                    padding: EdgeInsets.all(6),
+                    child: Icon(Icons.close, size: 14, color: Colors.white54),
+                  ),
                 ),
               ],
             ),
@@ -1203,8 +1342,8 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     }
 
     return Positioned(
-      top: 80,
-      right: 16,
+      top: 80 + _overlayInset,
+      right: 16 + _overlayInset,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
@@ -1326,12 +1465,18 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
             stops: const [0.0, 0.2, 0.8, 1.0],
           ),
         ),
-        child: Column(
-          children: [
-            _buildTopBar(currentProgram?.title),
-            Expanded(child: _buildCenterControls()),
-            _buildBottomBar(),
-          ],
+        // Contains traversal: without a group, an arrow press at the edge of
+        // the controls escapes into whatever else is in the scope - on the
+        // expanded mini player that is HomeScreen's navigation rail and
+        // channel list, sitting behind the video.
+        child: FocusTraversalGroup(
+          child: Column(
+            children: [
+              _buildTopBar(currentProgram?.title),
+              Expanded(child: _buildCenterControls()),
+              _buildBottomBar(),
+            ],
+          ),
         ),
       ),
     );
@@ -1451,6 +1596,10 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
             ),
             child: IconButton(
               iconSize: 64,
+              // The deterministic first focus target. Traversal needs
+              // *something* focused to move away from, and the centre
+              // play/pause button is the conventional landing spot on TV.
+              autofocus: kIsTv,
               icon: Icon(
                 (player?.state.playing ?? false)
                     ? Icons.pause
@@ -1498,8 +1647,10 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
           ),
           const Spacer(),
           Text(
-            'Space: Play/Pause • ↑↓: Channel • M: Mute • Q: Quality • '
-            'I: Stats • R: Reconnect • F: Fullscreen',
+            kIsTv
+                ? 'OK: Play/Pause • ↑↓: Channel • Back: Minimise'
+                : 'Space: Play/Pause • ↑↓: Channel • M: Mute • Q: Quality • '
+                    'I: Stats • R: Reconnect • F: Fullscreen',
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.5),
               fontSize: 11,

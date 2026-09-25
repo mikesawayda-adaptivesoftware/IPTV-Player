@@ -215,6 +215,12 @@ class StreamWatchdog {
   /// either way, so the UI can still warn the user when this is off.
   final bool Function() enabled;
 
+  /// What to tell the user when auto-recovery is off and the stream is frozen.
+  ///
+  /// Injected because the gesture differs by device - "tap" means nothing with
+  /// a remote - and this layer has no business knowing about form factors.
+  final String reconnectHint;
+
   final bool isLive;
 
   /// Overridable so tests can walk the ladder without waiting on wall-clock
@@ -238,6 +244,7 @@ class StreamWatchdog {
     this.onDegradeQuality,
     this.onCongested,
     this.onStatus,
+    this.reconnectHint = 'Stream frozen - tap to reconnect',
     this.verifyWindow = defaultVerifyWindow,
     this.backOffStep = const Duration(seconds: 5),
     this.maxBackOff = const Duration(seconds: 30),
@@ -436,7 +443,7 @@ class StreamWatchdog {
       _emit(WatchdogStatus(
         phase: WatchdogPhase.degraded,
         cause: cause,
-        message: 'Stream frozen - tap to reconnect',
+        message: reconnectHint,
       ));
       return;
     }

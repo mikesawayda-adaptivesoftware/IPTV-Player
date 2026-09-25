@@ -114,7 +114,9 @@ extension ContextExtensions on BuildContext {
       SnackBar(
         content: Text(message),
         backgroundColor: isError ? colorScheme.error : null,
-        behavior: SnackBarBehavior.floating,
+        // Fixed rather than floating on TV: a floating snackbar is inset from
+        // the bottom edge, which puts it inside the strip a TV crops.
+        behavior: kIsTv ? SnackBarBehavior.fixed : SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
     );

@@ -48,11 +48,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final isDesktop = context.isDesktop;
+    // While the mini player is expanded it draws over this whole Stack, but it
+    // is not a route - so without excluding the shell, the rail, the channel
+    // list and the FAB all stay live traversal targets *behind* the video, and
+    // a D-pad press moves focus to something invisible.
+    final playerExpanded = ref.watch(miniPlayerProvider).isExpanded;
 
     return Scaffold(
       body: Stack(
         children: [
-          Row(
+          ExcludeFocus(
+            excluding: playerExpanded,
+            child: Row(
             children: [
               // Navigation Rail for desktop
               if (isDesktop) _buildNavigationRail(),
@@ -63,14 +70,31 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               // tapped. No-op on desktop, which has no system insets. The
               // full-screen player routes are pushed separately and stay
               // edge-to-edge.
+              // IndexedStack, not _screens[_selectedIndex]: indexing
+              // disposed the outgoing screen's State on every tab change,
+              // losing its scroll position and whatever held focus. But
+              // IndexedStack keeps every child laid out with a real focus rect
+              // and only skips painting, so each inactive child has to be
+              // excluded explicitly or the D-pad wanders into Settings while
+              // Live TV is on screen.
               Expanded(
                 child: SafeArea(
-                  child: _screens[_selectedIndex],
+                  child: IndexedStack(
+                    index: _selectedIndex,
+                    children: [
+                      for (var i = 0; i < _screens.length; i++)
+                        ExcludeFocus(
+                          excluding: i != _selectedIndex,
+                          child: _screens[i],
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ],
           ),
-          
+          ),
+
           // Mini player overlay
           const MiniPlayerWidget(),
         ],

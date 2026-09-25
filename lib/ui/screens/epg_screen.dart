@@ -23,13 +23,51 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
   String _searchQuery = '';
   bool _searchPrograms = true; // Search both channels and programs
   final ScrollController _horizontalScrollController = ScrollController();
+
+  /// Vertical scrolling for the desktop grid's programme rows, and for the TV
+  /// layout's channel pane.
   final ScrollController _verticalScrollController = ScrollController();
+
+  /// Separate controller for the desktop grid's fixed channel-label column.
+  ///
+  /// One ScrollController cannot drive two Scrollables: each owns its own
+  /// ScrollPosition, so `offset` asserts and the two lists do not move
+  /// together. Both ListViews previously shared `_verticalScrollController`,
+  /// which desynced the labels from the rows on the first scroll.
+  final ScrollController _labelScrollController = ScrollController();
+
+  /// Guards the two-way sync below against feeding itself.
+  bool _syncingScroll = false;
   final TextEditingController _searchController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _verticalScrollController.addListener(
+      () => _mirrorScroll(_verticalScrollController, _labelScrollController),
+    );
+    _labelScrollController.addListener(
+      () => _mirrorScroll(_labelScrollController, _verticalScrollController),
+    );
+  }
+
+  /// Keeps the desktop grid's label column aligned with its programme rows.
+  void _mirrorScroll(ScrollController from, ScrollController to) {
+    if (_syncingScroll || !from.hasClients || !to.hasClients) return;
+    if (to.offset == from.offset) return;
+    _syncingScroll = true;
+    to.jumpTo(from.offset.clamp(
+      to.position.minScrollExtent,
+      to.position.maxScrollExtent,
+    ));
+    _syncingScroll = false;
+  }
 
   @override
   void dispose() {
     _horizontalScrollController.dispose();
     _verticalScrollController.dispose();
+    _labelScrollController.dispose();
     _searchController.dispose();
     super.dispose();
   }
@@ -225,6 +263,10 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
       );
     }
 
+    if (context.isTv) {
+      return _buildTwoPaneEPG(channelsWithEpg, epgData, now);
+    }
+
     return Row(
       children: [
         // Channel list (fixed)
@@ -244,7 +286,7 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
               // Channel names
               Expanded(
                 child: ListView.builder(
-                  controller: _verticalScrollController,
+                  controller: _labelScrollController,
                   itemCount: channelsWithEpg.length,
                   itemBuilder: (context, index) {
                     final channel = channelsWithEpg[index];
@@ -297,6 +339,162 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
         ),
       ],
     );
+  }
+
+  /// Two one-dimensional panes, for a remote.
+  ///
+  /// The desktop grid is not usable with a D-pad: two-axis traversal over
+  /// virtualised content dead-ends as soon as focus passes the ListView's cache
+  /// extent, because there is no node beyond it for `findNextFocusInDirection`
+  /// to find. It is also 1 + N unsynchronised scrollers rather than a real
+  /// grid - `_verticalScrollController` is attached to two ListViews at once,
+  /// the horizontal sync NotificationListener is an empty stub, and every row
+  /// scrolls independently - so making it focusable would have meant building
+  /// the grid properly first.
+  ///
+  /// Left pane picks a channel, right pane lists that channel's programmes.
+  /// Each axis is a single ListView, which virtualises normally and traverses
+  /// with stock Flutter behaviour. `_selectedChannelId` - previously an unused
+  /// field and the file's one analyzer warning - is the state that links them.
+  Widget _buildTwoPaneEPG(
+    List<Channel> channels,
+    Map<String, List<EPGProgram>> epgData,
+    DateTime now,
+  ) {
+    final selected = channels.firstWhere(
+      (c) => c.id == _selectedChannelId,
+      orElse: () => channels.first,
+    );
+    final selectedEpgId = selected.epgChannelId ?? selected.id;
+    final programs = epgData[selectedEpgId] ?? const <EPGProgram>[];
+
+    return Row(
+      children: [
+        // Channel pane. Its own traversal group so Right moves into the
+        // programme pane rather than stepping sideways through this list.
+        SizedBox(
+          width: 380,
+          child: FocusTraversalGroup(
+            child: ListView.builder(
+              controller: _verticalScrollController,
+              // Raised well above the default 250: when a focused item is
+              // unmounted its FocusNode is disposed, focusedChild goes null,
+              // and the next D-pad press teleports focus to the first node in
+              // the scope instead of the next channel.
+              cacheExtent: 1200,
+              itemCount: channels.length,
+              itemBuilder: (context, index) {
+                final channel = channels[index];
+                final isSelected = channel.id == selected.id;
+                final epgId = channel.epgChannelId ?? channel.id;
+                final current = _currentProgramOf(epgData[epgId], now);
+
+                return ListTile(
+                  selected: isSelected,
+                  selectedTileColor: AppTheme.primaryColor.withValues(alpha: 0.12),
+                  autofocus: index == 0,
+                  leading: Icon(
+                    isSelected ? Icons.play_circle : Icons.tv,
+                    color: isSelected ? AppTheme.primaryColor : AppTheme.textSecondary,
+                  ),
+                  title: Text(
+                    channel.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: Text(
+                    current?.title ?? 'No programme information',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  // Moving focus selects, so the right pane tracks the D-pad
+                  // without needing a press. Select then plays the channel,
+                  // which is what a viewer expects from a guide.
+                  onFocusChange: (focused) {
+                    if (focused && channel.id != _selectedChannelId) {
+                      setState(() => _selectedChannelId = channel.id);
+                    }
+                  },
+                  onTap: () => _playChannel(channel),
+                );
+              },
+            ),
+          ),
+        ),
+
+        const VerticalDivider(width: 1),
+
+        Expanded(
+          child: FocusTraversalGroup(
+            child: programs.isEmpty
+                ? Center(
+                    child: Text(
+                      'No programme information for ${selected.name}',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    itemCount: programs.length,
+                    itemBuilder: (context, index) {
+                      final program = programs[index];
+                      final isNow = program.startTime.isBefore(now) &&
+                          program.endTime.isAfter(now);
+
+                      return ListTile(
+                        leading: SizedBox(
+                          width: 92,
+                          child: Text(
+                            '${DateFormat('HH:mm').format(program.startTime)}'
+                            ' - '
+                            '${DateFormat('HH:mm').format(program.endTime)}',
+                            style: TextStyle(
+                              color: isNow
+                                  ? AppTheme.primaryColor
+                                  : AppTheme.textSecondary,
+                              fontWeight:
+                                  isNow ? FontWeight.w600 : FontWeight.normal,
+                            ),
+                          ),
+                        ),
+                        title: Text(
+                          program.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: program.description != null &&
+                                program.description!.isNotEmpty
+                            ? Text(
+                                program.description!,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              )
+                            : null,
+                        trailing: isNow
+                            ? const Chip(
+                                label: Text('NOW'),
+                                visualDensity: VisualDensity.compact,
+                              )
+                            : null,
+                        onTap: () => _showProgramDetails(program),
+                      );
+                    },
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// The programme airing at [now], or null.
+  static EPGProgram? _currentProgramOf(List<EPGProgram>? programs, DateTime now) {
+    if (programs == null) return null;
+    for (final program in programs) {
+      if (program.startTime.isBefore(now) && program.endTime.isAfter(now)) {
+        return program;
+      }
+    }
+    return null;
   }
 
   Widget _buildChannelLabel(Channel channel) {

@@ -28,7 +28,8 @@ A modern, high-performance cross-platform IPTV player built with Flutter. Suppor
 | macOS | ✅ Supported (Native) |
 | Windows | ✅ Supported (Native) |
 | Linux | ✅ Supported (Native) |
-| Android | ✅ Supported (Mobile & TV) |
+| Android (phone/tablet) | ✅ Supported (Native) |
+| Android TV / Google TV | ✅ Supported (D-pad navigation) |
 | iOS | 🚧 Coming soon |
 
 ## 🚀 Getting Started

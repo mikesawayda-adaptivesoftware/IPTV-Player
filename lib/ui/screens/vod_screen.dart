@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../widgets/tv_focusable.dart';
+import '../../core/platform/tv_platform.dart';
 import '../../core/utils/extensions.dart';
 import '../../data/models/vod_item.dart';
 import '../../data/models/playlist_source.dart';
@@ -297,8 +299,19 @@ class _VODCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    // One focus target per card, not three.
+    //
+    // The card used to carry an outer GestureDetector (unfocusable), a
+    // Positioned.fill InkWell and a favourite IconButton. Directional
+    // traversal filters candidates to those beyond the focused node's edge and
+    // then prefers the smallest vertical distance - and the next row's heart
+    // icon sits higher than its card's centre, so D-pad *down* landed on a
+    // heart every single time, never on a card. Collapsing the card to a
+    // single node fixes the geometry rather than papering over it.
+    return TvFocusable(
       onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      semanticLabel: item.name,
       child: Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
@@ -379,30 +392,45 @@ class _VODCard extends StatelessWidget {
             ),
             
             // Favorite button
+            //
+            // Excluded from traversal on TV so it cannot win a vertical move
+            // against the cards (see the note above). Still reachable by touch
+            // and mouse everywhere, and by keyboard off TV.
             Positioned(
               top: 4,
               right: 4,
-              child: IconButton(
-                icon: Icon(
-                  item.isFavorite ? Icons.favorite : Icons.favorite_border,
-                  color: item.isFavorite ? AppTheme.errorColor : Colors.white,
-                  size: 20,
+              child: ExcludeFocus(
+                excluding: kIsTv,
+                child: IconButton(
+                  icon: Icon(
+                    item.isFavorite ? Icons.favorite : Icons.favorite_border,
+                    color: item.isFavorite ? AppTheme.errorColor : Colors.white,
+                    size: 20,
+                  ),
+                  onPressed: onFavoriteToggle,
                 ),
-                onPressed: onFavoriteToggle,
               ),
             ),
             
-            // Play overlay on hover (desktop)
+            // Play overlay.
+            //
+            // On TV this is decoration only - the card is the focus target, and
+            // a second full-bleed node inside it would put two candidates at
+            // the same place and make traversal unpredictable. Off TV it keeps
+            // its InkWell so the ripple and pointer behaviour are unchanged.
             Positioned.fill(
-              child: Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: onTap,
-                  child: const Center(
-                    child: Icon(
-                      Icons.play_circle_outline,
-                      color: Colors.white54,
-                      size: 48,
+              child: IgnorePointer(
+                ignoring: kIsTv,
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: kIsTv ? null : onTap,
+                    child: const Center(
+                      child: Icon(
+                        Icons.play_circle_outline,
+                        color: Colors.white54,
+                        size: 48,
+                      ),
                     ),
                   ),
                 ),

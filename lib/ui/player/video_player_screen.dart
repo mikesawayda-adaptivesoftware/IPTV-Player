@@ -227,6 +227,11 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
+        // Plain GestureDetector on purpose: a whole-screen focusable node
+        // would swallow directional traversal, the same trap the live player's
+        // Focus interceptor exists to avoid. VOD is not reachable on TV today
+        // (no Channel identity, so no quality siblings), so there is no remote
+        // equivalent to add here.
         child: GestureDetector(
           onTap: _toggleControls,
           child: Stack(
