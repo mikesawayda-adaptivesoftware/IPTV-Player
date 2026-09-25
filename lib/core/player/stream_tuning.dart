@@ -56,6 +56,11 @@ enum BufferMode {
 class StreamTuning {
   StreamTuning._();
 
+  /// Sent to the provider on every request.
+  ///
+  /// Not the app's display name, and it must not be changed to follow one:
+  /// providers filter on User-Agent, and a rename that reached the wire could
+  /// lose access to a working subscription for no benefit.
   static const String userAgent = 'IPTV Player/1.0';
 
   /// Seconds a socket read may stall before FFmpeg aborts it.

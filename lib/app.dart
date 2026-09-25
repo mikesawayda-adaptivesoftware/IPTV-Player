@@ -19,7 +19,7 @@ class IPTVPlayerApp extends ConsumerWidget {
     final isTv = ref.watch(isTvProvider);
 
     return MaterialApp(
-      title: 'IPTV Player',
+      title: 'Definitely Not Cable',
       debugShowCheckedModeBanner: false,
       theme: isTv ? AppTheme.tvTheme : AppTheme.darkTheme,
       builder: isTv ? _applyOverscan : null,

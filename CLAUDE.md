@@ -248,6 +248,31 @@ Things that are the way they are for a reason:
   floats focusable over the video), "Add M3U File" (`ACTION_GET_CONTENT` has no resolver on
   most TVs), and the fullscreen toggle.
 
+### Branding
+
+The app's display name is **Definitely Not Cable**. Four places carry it:
+`android:label`, `MaterialApp.title`, `AppConstants.appName` and the Settings
+About card.
+
+**`StreamTuning.userAgent` is deliberately still `IPTV Player/1.0` and must stay
+that way.** It is sent to providers on every request, some of which filter on
+User-Agent, so a rename that reached the wire could lose access to a working
+subscription for nothing. Same for the two strings in `web_video_player.dart`
+and the one in `dev_harness.dart`.
+
+`tool/make_icons.py` generates every icon asset - five legacy launcher sizes,
+five adaptive foreground/background pairs, and the 320x180 TV banner - so the
+branding is editable rather than a pile of binaries. Run it from the repo root.
+Everything is drawn at 4x and downsampled, because Pillow's primitives are not
+anti-aliased. The constraint that shapes the design is legibility at 48px
+(mdpi), which rules out text and thin strokes; the banner is the only asset
+big enough to carry the name.
+
+Adaptive icons (`mipmap-anydpi-v26/ic_launcher.xml`) are used from API 26 on and
+the launcher masks the foreground to a circle, squircle or rounded square - so
+the foreground art stays inside the 66dp safe circle of its 108dp canvas. The
+legacy PNGs are still required for API 24-25, which minSdk 24 includes.
+
 `AppTheme.tvTheme` is `darkTheme.copyWith(...)`. The load-bearing part is `focusColor`:
 Material's dark default focus highlight is white at ~10% opacity, invisible across a room,
 which would make every screen unusable regardless of whether traversal worked.

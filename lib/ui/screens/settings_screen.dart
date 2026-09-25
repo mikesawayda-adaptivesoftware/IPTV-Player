@@ -131,7 +131,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'IPTV Player',
+                              'Definitely Not Cable',
                               style: TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.bold,

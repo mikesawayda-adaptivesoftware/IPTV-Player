@@ -27,7 +27,7 @@
         android:required="false"/>
 
     <application
-        android:label="IPTV Player"
+        android:label="Definitely Not Cable"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:banner="@drawable/banner"

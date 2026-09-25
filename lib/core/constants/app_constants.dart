@@ -2,7 +2,12 @@ class AppConstants {
   AppConstants._();
 
   // App info
-  static const String appName = 'IPTV Player';
+  //
+  // Display name only. Deliberately NOT the same string as
+  // StreamTuning.userAgent: that one is sent to IPTV providers, some of which
+  // filter on User-Agent, so renaming the app must not change what goes out
+  // on the wire.
+  static const String appName = 'Definitely Not Cable';
   static const String appVersion = '1.0.0';
 
   // Hive box names
