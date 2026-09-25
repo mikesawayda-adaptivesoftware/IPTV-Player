@@ -67,8 +67,11 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
     _player = Player();
     _controller = VideoController(
       _player,
-      configuration: const VideoControllerConfiguration(
-        enableHardwareAcceleration: false, // Force software rendering
+      configuration: VideoControllerConfiguration(
+        // Software rendering on Linux only; see
+        // StreamTuning.enableHardwareAcceleration. This was unconditional,
+        // which made 1080p unplayable on low-power Android devices.
+        enableHardwareAcceleration: StreamTuning.enableHardwareAcceleration,
       ),
     );
 
@@ -224,6 +227,11 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
+        // Plain GestureDetector on purpose: a whole-screen focusable node
+        // would swallow directional traversal, the same trap the live player's
+        // Focus interceptor exists to avoid. VOD is not reachable on TV today
+        // (no Channel identity, so no quality siblings), so there is no remote
+        // equivalent to add here.
         child: GestureDetector(
           onTap: _toggleControls,
           child: Stack(

@@ -78,6 +78,11 @@ if [[ "$BUILD_CHOICE" == "y" || "$BUILD_CHOICE" == "Y" ]]; then
             echo -e "${BLUE}📱 Building Android APK...${NC}"
             flutter build apk --release
             echo -e "${GREEN}✅ APK built: build/app/outputs/flutter-apk/app-release.apk${NC}"
+            echo -e "${YELLOW}   This is the universal APK - it carries all ABIs and will"
+            echo -e "   install on phones and on TV boxes. Hand out THIS file.${NC}"
+            echo -e "${YELLOW}   'flutter build apk --split-per-abi' produces smaller"
+            echo -e "   per-ABI files instead; handing someone the wrong one is"
+            echo -e "   INSTALL_FAILED_NO_MATCHING_ABIS on their device.${NC}"
             ;;
         2)
             echo -e "${BLUE}📱 Building Android App Bundle...${NC}"

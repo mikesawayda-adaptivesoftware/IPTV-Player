@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 
 /// Buffer / latency profile applied to every player.
@@ -55,10 +56,25 @@ enum BufferMode {
 class StreamTuning {
   StreamTuning._();
 
+  /// Sent to the provider on every request.
+  ///
+  /// Not the app's display name, and it must not be changed to follow one:
+  /// providers filter on User-Agent, and a rename that reached the wire could
+  /// lose access to a working subscription for no benefit.
   static const String userAgent = 'IPTV Player/1.0';
 
   /// Seconds a socket read may stall before FFmpeg aborts it.
   static const int networkTimeoutSeconds = 10;
+
+  /// Whether the video controller may use the GPU.
+  ///
+  /// This used to be hardcoded false in every player, as a workaround for GPU
+  /// texture crashes on Linux. Keeping it off on Android was collateral damage:
+  /// software-decoding 1080p H.264 on a low-power TV SoC does not keep up, so
+  /// on a TV box the workaround was the difference between working and not.
+  /// Narrowed to the platform that actually needs it.
+  static bool get enableHardwareAcceleration =>
+      defaultTargetPlatform != TargetPlatform.linux;
 
   /// Applies tuning to [player]. Safe to call on any platform and at any point
   /// after the player is constructed - unsupported properties are skipped

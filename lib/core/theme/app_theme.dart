@@ -230,5 +230,60 @@ class AppTheme {
       ),
     );
   }
-}
 
+  /// The same theme, sized and lit for a remote at three metres.
+  ///
+  /// Built with `copyWith` off [darkTheme] rather than as a parallel builder,
+  /// so colours, shapes and every sub-theme not listed here stay in one place.
+  /// Android TV guidance wants a dark UI anyway, so only density, type scale
+  /// and - above all - focus visibility change.
+  static ThemeData get tvTheme {
+    final base = darkTheme;
+
+    // Material's dark default focus highlight is white at about 10% opacity.
+    // On a TV across a room that is invisible, which makes every screen
+    // unusable regardless of whether traversal works. This is the single most
+    // important line in the file for TV.
+    final focus = primaryColor.withValues(alpha: 0.55);
+
+    return base.copyWith(
+      focusColor: focus,
+      visualDensity: VisualDensity.comfortable,
+
+      // Scales everything theme-driven at once. Note the ~20 hardcoded
+      // fontSize literals in the EPG cells and player overlays bypass the
+      // theme entirely and are handled at their call sites, because they sit
+      // inside fixed-height containers that have to grow with them.
+      textTheme: base.textTheme.apply(fontSizeFactor: 1.15),
+
+      listTileTheme: base.listTileTheme.copyWith(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+        minVerticalPadding: 12,
+      ),
+
+      // A filled disc behind the focused icon rather than a faint tint - icon
+      // buttons are small targets and need the strongest possible cue.
+      iconButtonTheme: IconButtonThemeData(
+        style: IconButton.styleFrom(foregroundColor: textPrimary).copyWith(
+          backgroundColor: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.focused) ? focus : null,
+          ),
+        ),
+      ),
+
+      chipTheme: base.chipTheme.copyWith(
+        side: WidgetStateBorderSide.resolveWith(
+          (states) => states.contains(WidgetState.focused)
+              ? const BorderSide(color: primaryColor, width: 3)
+              : BorderSide(color: textMuted.withValues(alpha: 0.2)),
+        ),
+      ),
+
+      navigationRailTheme: base.navigationRailTheme.copyWith(
+        useIndicator: true,
+        indicatorColor: focus,
+        minWidth: 88,
+      ),
+    );
+  }
+}

@@ -7,9 +7,16 @@ Guidance for Claude Code when working in this repository.
 Cross-platform IPTV player in Flutter. Plays live TV and VOD from **M3U playlists** and
 **Xtream Codes** providers. ~8,400 lines of Dart.
 
-**Targets:** Windows, macOS, Linux, Android. There is **no `ios/` and no `web/` directory** —
-despite `lib/ui/player/web_video_player.dart` and the `video_player_web` dependency existing,
-web is not a buildable target. Don't trust the README's platform table.
+**Targets:** Windows, macOS, Linux, Android phone, and Android TV / Google TV. There is
+**no `ios/` and no `web/` directory** — despite `lib/ui/player/web_video_player.dart` and the
+`video_player_web` dependency existing, web is not a buildable target. The README's platform
+table used to claim TV support before any existed; it is accurate now, but check it against
+this file rather than the reverse.
+
+**One APK serves phone and TV.** No product flavors, no second source tree. `kIsTv` is
+latched in `main()` before `runApp` from a MethodChannel (`UiModeManager`, OR'd with the
+leanback feature and the absence of a touchscreen), and every layout, theme and input
+difference branches on it. See "Android TV" below.
 
 ## Commands
 
@@ -177,6 +184,98 @@ final v = await native.getProperty('demuxer-cache-time');
 ```
 
 Guard every such call — `platform` is `PlatformPlayer?` and is a `WebPlayer` on web.
+
+### Android TV
+
+One APK, no flavors. `kIsTv` (`core/platform/tv_platform.dart`) is resolved once in `main()`
+before `runApp` — before, because it selects the theme and every layout branch, so resolving
+it later would re-layout the first frame. Exposed as `context.isTv` and as `isTvProvider`;
+both read the same latched global so they cannot disagree. A three-state override in Settings
+forces it either way, which is how the TV layout gets exercised on a desktop.
+
+**`context.isDesktop` excludes TV explicitly.** A 1080p TV reports roughly 960×540 logical
+pixels at density 2.0, clearing the `> 900` threshold by 60dp — so before this it silently
+inherited the whole desktop layout. That one exclusion is what routes TV to its own branches
+in `home_screen`, `live_tv_screen` and `vod_screen`.
+
+Things that are the way they are for a reason:
+
+- **The player's key handler is a `Focus` with `canRequestFocus: false`.** It was a
+  `KeyboardListener` with `autofocus: true`, which made a full-screen node the scope's
+  `focusedChild` — and directional traversal filters candidates to those *beyond* the focused
+  node's edge, so with a full-screen rect the candidate set was empty in all four directions
+  and focus could never reach any control, on a remote or a desktop keyboard. As a
+  non-focusable interceptor it still receives every key by bubbling up the ancestor chain,
+  while the real `focusedChild` is a button traversal can move away from. Do not give this
+  node focus again.
+- **Claimed keys are consumed on both edges.** Anything returning `handled` on key-down must
+  also consume its key-up, or the up is redispatched to the Android activity — and Back fires
+  on `ACTION_UP`, so the activity pops out from under the app. `_claimedKeys` exists so the
+  set is stated once; `_swallowSelectUp` latches the one case where the claim is conditional.
+- **Up/Down always change channel**, even with the controls hidden. Left/Right/Select wake the
+  controls first. Channel surfing is the most-used interaction and must not cost two presses.
+- **Select needs no key mapping.** Flutter's default shortcuts already bind
+  `LogicalKeyboardKey.select` (D-pad centre, Android keycode 23) to `ActivateIntent` on
+  Android, so any focusable widget activates from the remote's OK button.
+- **Controls stay mounted while hidden.** `_buildControls` fades itself with
+  `AnimatedOpacity`; the old `if (_showControls && …)` guard meant that animation never ran
+  in its fade-out direction and, worse for a remote, the focused button left the tree when
+  the hide timer fired. `IgnorePointer` covers the pointer case.
+- **`TvFocusable`** (`ui/widgets/tv_focusable.dart`) is for hand-rolled `GestureDetector`
+  controls, which create no focus node and are invisible to a remote. Material widgets built
+  on `InkWell` — `ListTile`, `IconButton`, `FilterChip` — already traverse and do not need it.
+  It uses `foregroundDecoration` for the ring so focusing something cannot reflow the layout.
+- **A VOD card is one focus node.** It used to be three (outer detector, full-bleed `InkWell`,
+  favourite button). Traversal prefers the smallest vertical distance, and the next row's
+  heart icon sits higher than its card's centre — so D-pad *down* landed on a heart every
+  time, never a card. The favourite is `ExcludeFocus`d on TV rather than removed.
+- **The expanded mini player is not a route**, so Back was popping HomeScreen and exiting the
+  app mid-playback. A `PopScope` in that subtree intercepts it and minimises instead. The
+  shell is also `ExcludeFocus`d while it is up, or the rail and channel list stay traversable
+  behind the video.
+- **`IndexedStack` needs `ExcludeFocus` on its inactive children.** It keeps every child laid
+  out with a real focus rect and only skips painting, so without that the D-pad wanders into
+  Settings while Live TV is on screen.
+- **Overscan is injected into `MediaQuery`**, not applied as a `Padding` — a Padding would
+  letterbox the video. Existing `SafeArea`s then work for free. The player's `Stack` is
+  deliberately full-bleed, so its absolutely-positioned overlays add `_overlayInset`
+  themselves.
+- **The EPG uses two one-dimensional panes on TV**, not the desktop grid. Two-axis traversal
+  over virtualised content dead-ends past the `ListView` cache extent, and the grid is
+  1 + N unsynchronised scrollers rather than a real grid. The channel pane raises
+  `cacheExtent` because an unmounted focused node teleports focus to the top of the scope.
+- **Hidden on TV:** multi-view and its FAB (four players will not run on a box, and the FAB
+  floats focusable over the video), "Add M3U File" (`ACTION_GET_CONTENT` has no resolver on
+  most TVs), and the fullscreen toggle.
+
+### Branding
+
+The app's display name is **Definitely Not Cable**. Four places carry it:
+`android:label`, `MaterialApp.title`, `AppConstants.appName` and the Settings
+About card.
+
+**`StreamTuning.userAgent` is deliberately still `IPTV Player/1.0` and must stay
+that way.** It is sent to providers on every request, some of which filter on
+User-Agent, so a rename that reached the wire could lose access to a working
+subscription for nothing. Same for the two strings in `web_video_player.dart`
+and the one in `dev_harness.dart`.
+
+`tool/make_icons.py` generates every icon asset - five legacy launcher sizes,
+five adaptive foreground/background pairs, and the 320x180 TV banner - so the
+branding is editable rather than a pile of binaries. Run it from the repo root.
+Everything is drawn at 4x and downsampled, because Pillow's primitives are not
+anti-aliased. The constraint that shapes the design is legibility at 48px
+(mdpi), which rules out text and thin strokes; the banner is the only asset
+big enough to carry the name.
+
+Adaptive icons (`mipmap-anydpi-v26/ic_launcher.xml`) are used from API 26 on and
+the launcher masks the foreground to a circle, squircle or rounded square - so
+the foreground art stays inside the 66dp safe circle of its 108dp canvas. The
+legacy PNGs are still required for API 24-25, which minSdk 24 includes.
+
+`AppTheme.tvTheme` is `darkTheme.copyWith(...)`. The load-bearing part is `focusColor`:
+Material's dark default focus highlight is white at ~10% opacity, invisible across a room,
+which would make every screen unusable regardless of whether traversal worked.
 
 ### Quality degradation
 

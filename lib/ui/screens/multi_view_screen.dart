@@ -13,6 +13,7 @@ import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/channel.dart';
 import '../../providers/playlist_provider.dart';
+import '../widgets/tv_focusable.dart';
 import '../player/enhanced_video_player.dart'
     show autoReconnectProvider, bufferModeProvider;
 
@@ -404,7 +405,11 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
     final slot = _slots[index];
     final isActive = index == _activeAudioSlot;
     
-    return GestureDetector(
+    return TvFocusable(
+      borderRadius: BorderRadius.circular(8),
+      semanticLabel: slot.channel == null
+          ? 'Empty slot ${index + 1}, pick a channel'
+          : 'Slot ${index + 1}, ${slot.channel!.name}',
       onTap: () {
         if (slot.channel != null) {
           _setActiveAudio(index);
@@ -541,10 +546,14 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
                     const SizedBox(width: 8),
 
                     // Quality
-                    GestureDetector(
+                    TvFocusable(
+                      borderRadius: BorderRadius.circular(4),
+                      semanticLabel: 'Quality for slot ${index + 1}',
                       onTap: () => _showSlotQualityPicker(index),
                       child: Container(
-                        padding: const EdgeInsets.all(4),
+                        // Was 4dp around a 14dp icon - a ~22dp target, well
+                        // under the 48dp minimum and impossible to aim at.
+                        padding: const EdgeInsets.all(10),
                         decoration: BoxDecoration(
                           color: Colors.black54,
                           borderRadius: BorderRadius.circular(4),
@@ -562,10 +571,12 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
                     const SizedBox(width: 8),
 
                     // Remove button
-                    GestureDetector(
+                    TvFocusable(
+                      borderRadius: BorderRadius.circular(4),
+                      semanticLabel: 'Remove slot ${index + 1}',
                       onTap: () => _removeChannelFromSlot(index),
                       child: Container(
-                        padding: const EdgeInsets.all(4),
+                        padding: const EdgeInsets.all(10),
                         decoration: BoxDecoration(
                           color: Colors.black54,
                           borderRadius: BorderRadius.circular(4),

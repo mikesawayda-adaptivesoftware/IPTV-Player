@@ -6,9 +6,11 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../../core/player/quality_controller.dart';
 import '../../core/player/stream_quality.dart';
 import '../../core/player/stream_tuning.dart';
+import '../../core/platform/tv_platform.dart';
 import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/channel.dart';
+import 'tv_focusable.dart';
 import '../../providers/playlist_provider.dart';
 import '../player/enhanced_video_player.dart';
 
@@ -56,6 +58,10 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
   QualityController? _quality;
   String? _url;
 
+  /// Guards the keep-awake hold so repeated [play] calls (a channel change)
+  /// take it once rather than leaking a hold each time.
+  bool _holdingScreenAwake = false;
+
   MiniPlayerNotifier(this._ref) : super(const MiniPlayerState());
 
   Future<void> play(Channel channel) async {
@@ -65,6 +71,11 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
     _quality = null;
 
     _url = channel.streamUrl;
+
+    if (!_holdingScreenAwake) {
+      _holdingScreenAwake = true;
+      TvPlatform.acquireKeepScreenOn();
+    }
 
     final quality = QualityController(
       playerRef: () => state.player,
@@ -181,6 +192,7 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
   }
 
   void hide() {
+    _releaseScreenAwake();
     _watchdog?.dispose();
     _watchdog = null;
     _quality?.dispose();
@@ -194,8 +206,15 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
     state.player?.playOrPause();
   }
 
+  void _releaseScreenAwake() {
+    if (!_holdingScreenAwake) return;
+    _holdingScreenAwake = false;
+    TvPlatform.releaseKeepScreenOn();
+  }
+
   @override
   void dispose() {
+    _releaseScreenAwake();
     _watchdog?.dispose();
     _quality?.dispose();
     state.player?.dispose();
@@ -225,7 +244,9 @@ class MiniPlayerWidget extends ConsumerWidget {
     return Positioned(
       right: 16,
       bottom: 16,
-      child: GestureDetector(
+      child: TvFocusable(
+        borderRadius: BorderRadius.circular(12),
+        semanticLabel: 'Expand player',
         onTap: () => ref.read(miniPlayerProvider.notifier).expand(),
         child: Container(
           width: 320,
@@ -298,8 +319,14 @@ class MiniPlayerWidget extends ConsumerWidget {
                           size: 20,
                         ),
                         onPressed: () => ref.read(miniPlayerProvider.notifier).togglePlayPause(),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                        // Constraints were stripped entirely, giving ~20dp
+                        // targets - unusable with a remote focus ring, and
+                        // under the 48dp minimum for touch too.
+                        padding: const EdgeInsets.all(8),
+                        constraints: const BoxConstraints(
+                          minWidth: 40,
+                          minHeight: 40,
+                        ),
                       ),
                       
                       const SizedBox(width: 8),
@@ -308,8 +335,14 @@ class MiniPlayerWidget extends ConsumerWidget {
                       IconButton(
                         icon: const Icon(Icons.fullscreen, color: Colors.white, size: 20),
                         onPressed: () => ref.read(miniPlayerProvider.notifier).expand(),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                        // Constraints were stripped entirely, giving ~20dp
+                        // targets - unusable with a remote focus ring, and
+                        // under the 48dp minimum for touch too.
+                        padding: const EdgeInsets.all(8),
+                        constraints: const BoxConstraints(
+                          minWidth: 40,
+                          minHeight: 40,
+                        ),
                       ),
                       
                       const SizedBox(width: 8),
@@ -318,8 +351,14 @@ class MiniPlayerWidget extends ConsumerWidget {
                       IconButton(
                         icon: const Icon(Icons.close, color: Colors.white, size: 20),
                         onPressed: () => ref.read(miniPlayerProvider.notifier).hide(),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                        // Constraints were stripped entirely, giving ~20dp
+                        // targets - unusable with a remote focus ring, and
+                        // under the 48dp minimum for touch too.
+                        padding: const EdgeInsets.all(8),
+                        constraints: const BoxConstraints(
+                          minWidth: 40,
+                          minHeight: 40,
+                        ),
                       ),
                     ],
                   ),
@@ -354,12 +393,27 @@ class MiniPlayerWidget extends ConsumerWidget {
   }
 
   Widget _buildExpandedPlayer(BuildContext context, WidgetRef ref, MiniPlayerState state) {
+    // PopScope rather than pushing a real route.
+    //
+    // The expanded player is drawn inside HomeScreen's body Stack, so Android's
+    // Back button was popping HomeScreen itself - exiting the app in the middle
+    // of playback. PopScope registers against the enclosing route, so while
+    // this subtree is mounted it intercepts that pop and minimizes instead,
+    // which is the behaviour a remote's Back button needs. Route-ifying the
+    // player would also work but would move ownership of the Player instance,
+    // and this is the whole fix in five lines.
     return Positioned.fill(
-      child: EnhancedVideoPlayer(
-        channel: state.channel!,
-        isLive: true,
-        onClose: () => ref.read(miniPlayerProvider.notifier).hide(),
-        onMinimize: () => ref.read(miniPlayerProvider.notifier).minimize(),
+      child: PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) ref.read(miniPlayerProvider.notifier).minimize();
+        },
+        child: EnhancedVideoPlayer(
+          channel: state.channel!,
+          isLive: true,
+          onClose: () => ref.read(miniPlayerProvider.notifier).hide(),
+          onMinimize: () => ref.read(miniPlayerProvider.notifier).minimize(),
+        ),
       ),
     );
   }
