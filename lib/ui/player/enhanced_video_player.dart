@@ -10,6 +10,7 @@ import '../../core/constants/app_constants.dart';
 import '../../core/player/quality_controller.dart';
 import '../../core/player/stream_quality.dart';
 import '../../core/player/stream_tuning.dart';
+import '../../core/platform/tv_platform.dart';
 import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/channel.dart';
@@ -64,7 +65,8 @@ class EnhancedVideoPlayer extends ConsumerStatefulWidget {
   ConsumerState<EnhancedVideoPlayer> createState() => _EnhancedVideoPlayerState();
 }
 
-class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
+class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
+    with WidgetsBindingObserver {
   // Nullable, and rebuilt from scratch by the watchdog's recreate step - a
   // wedged libmpv instance cannot be recovered any other way.
   Player? _player;
@@ -121,6 +123,12 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
     // swipe from an edge to reveal them briefly.
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
+    // media_kit draws into a Flutter Texture rather than a SurfaceView, so
+    // Android cannot tell that video is on screen and the TV's screensaver
+    // fires mid-programme. Nothing else in the app takes a wakelock.
+    WidgetsBinding.instance.addObserver(this);
+    TvPlatform.acquireKeepScreenOn();
+
     // Constructed before the watchdog because the watchdog's quality callbacks
     // point at it; its own watchdogRef is a closure, so the cycle is fine.
     _quality = QualityController(
@@ -155,6 +163,18 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(channelStateProvider.notifier).markAsWatched(_currentChannel);
     });
+  }
+
+  /// Stops playback when the app leaves the foreground.
+  ///
+  /// Without this, pressing Home on a TV leaves audio playing from a
+  /// backgrounded app with no way to stop it short of killing the process.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _player?.pause();
+    }
   }
 
   Future<void> _bootstrap() async {
@@ -200,9 +220,11 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
 
       final controller = VideoController(
         player,
-        configuration: const VideoControllerConfiguration(
-          // Software rendering - works around GPU texture crashes seen on Linux.
-          enableHardwareAcceleration: false,
+        configuration: VideoControllerConfiguration(
+          // Software rendering on Linux only, where GPU textures crash on some
+          // drivers. Everywhere else - and on a TV box especially - software
+          // decoding cannot sustain 1080p.
+          enableHardwareAcceleration: StreamTuning.enableHardwareAcceleration,
         ),
       );
 
@@ -417,6 +439,8 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
       DeviceOrientation.landscapeLeft,
       DeviceOrientation.landscapeRight,
     ]);
+    WidgetsBinding.instance.removeObserver(this);
+    TvPlatform.releaseKeepScreenOn();
     _hideTimer?.cancel();
     _statsTimer?.cancel();
     _quality.dispose();
@@ -457,6 +481,9 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer> {
   }
 
   void _toggleFullscreen() {
+    // Meaningless on TV: the app is already full-screen, and both
+    // immersiveSticky and setPreferredOrientations are no-ops there.
+    if (kIsTv) return;
     setState(() => _isFullscreen = !_isFullscreen);
 
     // The player is immersive for its whole lifetime (see initState), so the

@@ -1,0 +1,12 @@
+# Copy to android/key.properties (gitignored) and fill in.
+# Generate the keystore with:
+#
+#   keytool -genkey -v -keystore ~/iptv-player-release.jks \
+#     -keyalg RSA -keysize 2048 -validity 10000 -alias iptv-player
+#
+# Back the .jks file and these passwords up somewhere safe. Losing them means
+# you can never ship an update that Android will accept as the same app.
+storeFile=/absolute/path/to/iptv-player-release.jks
+storePassword=
+keyAlias=iptv-player
+keyPassword=

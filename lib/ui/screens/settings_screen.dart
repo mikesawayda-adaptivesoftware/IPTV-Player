@@ -4,9 +4,12 @@ import 'package:file_picker/file_picker.dart';
 
 import '../../core/constants/app_constants.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/extensions.dart';
 import '../../data/models/playlist_source.dart';
 import '../../data/services/storage_service.dart';
+import '../../core/platform/tv_platform.dart';
 import '../../providers/playlist_provider.dart';
+import '../../providers/tv_provider.dart';
 import '../player/enhanced_video_player.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -49,15 +52,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   onTap: () => _showAddM3UDialog(context, isUrl: true),
                 ),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _ActionCard(
-                  icon: Icons.folder_open,
-                  title: 'Add M3U File',
-                  subtitle: 'From local file',
-                  onTap: () => _pickM3UFile(),
+              // Hidden on TV: file_picker fires ACTION_GET_CONTENT, and most
+              // Android TV devices ship no DocumentsUI to resolve it, so the
+              // picker either fails or returns nothing.
+              if (!context.isTv) ...[
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _ActionCard(
+                    icon: Icons.folder_open,
+                    title: 'Add M3U File',
+                    subtitle: 'From local file',
+                    onTap: () => _pickM3UFile(),
+                  ),
                 ),
-              ),
+              ],
               const SizedBox(width: 12),
               Expanded(
                 child: _ActionCard(
@@ -171,6 +179,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final bufferMode = ref.watch(bufferModeProvider);
     final autoReconnect = ref.watch(autoReconnectProvider);
     final qualityPolicy = ref.watch(qualityPolicyProvider);
+    final tvOverride = ref.watch(tvModeOverrideProvider);
     final storage = StorageService();
 
     return Card(
@@ -270,6 +279,56 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               contentPadding: EdgeInsets.zero,
             ),
             
+            const Divider(height: 32),
+
+            // Device layout
+            const Text(
+              'Device Layout',
+              style: TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              context.isTv
+                  ? 'Running the TV layout: larger text, focus highlighting and '
+                      'remote navigation. Takes effect on restart.'
+                  : 'Running the touch and pointer layout. Forcing the TV '
+                      'layout here is how you preview it without a TV. Takes '
+                      'effect on restart.',
+              style: const TextStyle(fontSize: 12, color: AppTheme.textMuted),
+            ),
+            const SizedBox(height: 12),
+
+            ...TvModeOverride.values.map((mode) => RadioListTile<TvModeOverride>(
+              title: Text(mode.label),
+              subtitle: Text(
+                mode.description,
+                style: const TextStyle(fontSize: 12),
+              ),
+              value: mode,
+              groupValue: tvOverride,
+              onChanged: (value) {
+                if (value == null) return;
+                ref.read(tvModeOverrideProvider.notifier).state = value;
+                storage.saveSetting(
+                  AppConstants.settingTvModeOverride,
+                  value.index,
+                );
+                // Deliberately not applied live. kIsTv is latched before
+                // runApp so the very first frame is already the right layout,
+                // and the theme, every layout branch and the focus wiring all
+                // read it - re-deriving them mid-session would be a much
+                // larger change than a restart is worth for a debug control.
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Restart the app to apply the layout change'),
+                  ),
+                );
+              },
+              activeColor: AppTheme.primaryColor,
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+            )),
+
             const Divider(height: 32),
             
             // Info box

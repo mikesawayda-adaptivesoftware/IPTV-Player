@@ -6,6 +6,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../../core/player/quality_controller.dart';
 import '../../core/player/stream_quality.dart';
 import '../../core/player/stream_tuning.dart';
+import '../../core/platform/tv_platform.dart';
 import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/channel.dart';
@@ -56,6 +57,10 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
   QualityController? _quality;
   String? _url;
 
+  /// Guards the keep-awake hold so repeated [play] calls (a channel change)
+  /// take it once rather than leaking a hold each time.
+  bool _holdingScreenAwake = false;
+
   MiniPlayerNotifier(this._ref) : super(const MiniPlayerState());
 
   Future<void> play(Channel channel) async {
@@ -65,6 +70,11 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
     _quality = null;
 
     _url = channel.streamUrl;
+
+    if (!_holdingScreenAwake) {
+      _holdingScreenAwake = true;
+      TvPlatform.acquireKeepScreenOn();
+    }
 
     final quality = QualityController(
       playerRef: () => state.player,
@@ -181,6 +191,7 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
   }
 
   void hide() {
+    _releaseScreenAwake();
     _watchdog?.dispose();
     _watchdog = null;
     _quality?.dispose();
@@ -194,8 +205,15 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
     state.player?.playOrPause();
   }
 
+  void _releaseScreenAwake() {
+    if (!_holdingScreenAwake) return;
+    _holdingScreenAwake = false;
+    TvPlatform.releaseKeepScreenOn();
+  }
+
   @override
   void dispose() {
+    _releaseScreenAwake();
     _watchdog?.dispose();
     _quality?.dispose();
     state.player?.dispose();

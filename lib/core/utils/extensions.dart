@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../platform/tv_platform.dart';
+
 extension StringExtensions on String {
   /// Capitalize the first letter of the string
   String capitalize() {
@@ -86,14 +88,25 @@ extension ContextExtensions on BuildContext {
   /// Check if device is in landscape mode
   bool get isLandscape => MediaQuery.of(this).orientation == Orientation.landscape;
 
+  /// Whether this is a TV, driven by a remote rather than touch or a mouse.
+  ///
+  /// Resolved once at startup; see [kIsTv].
+  bool get isTv => kIsTv;
+
   /// Check if device is desktop (width > 900)
-  bool get isDesktop => screenSize.width > 900;
+  ///
+  /// Excludes TVs explicitly. At 1080p with density 2.0 a TV reports roughly
+  /// 960x540 logical pixels, so it clears the 900 threshold by 60dp and would
+  /// otherwise silently inherit the whole desktop layout - navigation rail,
+  /// 220px category sidebar, six-column VOD grid - none of which is usable
+  /// from a sofa. This single exclusion is what routes TV to its own branches.
+  bool get isDesktop => !kIsTv && screenSize.width > 900;
 
   /// Check if device is tablet (width > 600)
-  bool get isTablet => screenSize.width > 600 && screenSize.width <= 900;
+  bool get isTablet => !kIsTv && screenSize.width > 600 && screenSize.width <= 900;
 
   /// Check if device is mobile (width <= 600)
-  bool get isMobile => screenSize.width <= 600;
+  bool get isMobile => !kIsTv && screenSize.width <= 600;
 
   /// Show a snackbar
   void showSnackBar(String message, {bool isError = false}) {

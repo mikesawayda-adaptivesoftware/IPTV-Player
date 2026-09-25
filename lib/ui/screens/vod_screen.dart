@@ -163,7 +163,14 @@ class _VODScreenState extends ConsumerState<VODScreen> {
 
   Widget _buildVODGrid(List<VODItem> items) {
     final isDesktop = context.isDesktop;
-    final crossAxisCount = isDesktop ? 6 : (context.isTablet ? 4 : 3);
+    // A 1080p TV is only about 960dp wide at density 2.0, and the rail and
+    // category sidebar take ~300 of that - six columns would leave ~96dp
+    // posters, unreadable from a sofa.
+    final crossAxisCount = context.isTv
+        ? 3
+        : isDesktop
+            ? 6
+            : (context.isTablet ? 4 : 3);
 
     return GridView.builder(
       padding: const EdgeInsets.all(16),

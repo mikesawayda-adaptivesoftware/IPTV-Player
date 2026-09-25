@@ -77,8 +77,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ),
       // Bottom nav for mobile/tablet
       bottomNavigationBar: isDesktop ? null : _buildBottomNavBar(),
-      // FAB for multi-view
-      floatingActionButton: FloatingActionButton(
+      // Not on TV: four simultaneous media_kit players will not run on a TV
+      // box, and the FAB is a focusable target floating over the video inside
+      // the overscan margin.
+      floatingActionButton: context.isTv ? null : FloatingActionButton(
         onPressed: () {
           Navigator.of(context).push(
             MaterialPageRoute(builder: (context) => const MultiViewScreen()),

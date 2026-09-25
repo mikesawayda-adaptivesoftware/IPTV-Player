@@ -1,18 +1,40 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    
+
     <!-- Permissions -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
-    
+
+    <!--
+      Android TV / Google TV support.
+
+      Android implicitly requires android.hardware.touchscreen unless told
+      otherwise, and a TV has none - so without the first line here the Play
+      Store and the Google TV launcher both filter this app out as
+      incompatible. (Note that `adb install` does NOT enforce uses-feature, so
+      a sideload can succeed while the app never appears in the launcher.)
+
+      leanback is declared optional rather than required so one APK still
+      serves phones and tablets; the UI adapts at runtime from the isTv
+      detection in MainActivity rather than from a build flavour.
+    -->
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false"/>
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false"/>
+
     <application
         android:label="IPTV Player"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:banner="@drawable/banner"
         android:usesCleartextTraffic="true"
-        android:networkSecurityConfig="@xml/network_security_config">
-        
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:enableOnBackInvokedCallback="false">
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -21,32 +43,43 @@
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize">
-            
+
             <meta-data
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
-            
+
+            <!--
+              LEANBACK_LAUNCHER is what puts the app on the Google TV home
+              screen; LAUNCHER alone is invisible there. Both categories sit in
+              one filter so a single activity serves both form factors.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
             </intent-filter>
-            
-            <!-- M3U file handling -->
+
+            <!--
+              M3U file handling. Deliberately no `mimeType="*/*"` - paired with
+              the wildcard this filter advertised the app as a handler for every
+              file type on the device. `content` is listed because `file://`
+              URIs throw FileUriExposedException at the sender from API 24 on,
+              so the file scheme alone is effectively dead at targetSdk 36.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="content"/>
                 <data android:scheme="file"/>
-                <data android:mimeType="*/*"/>
                 <data android:pathPattern=".*\\.m3u"/>
                 <data android:pathPattern=".*\\.m3u8"/>
             </intent-filter>
         </activity>
-        
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
     </application>
 </manifest>
-
