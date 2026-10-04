@@ -233,8 +233,10 @@ Things that are the way they are for a reason:
 - **Text fields go through `TvTextField`** (`ui/widgets/tv_text_field.dart`). A stock
   `TextField` is a trap on a remote: `DefaultTextEditingShortcuts` binds Up/Down to caret
   moves and reports them handled, so focus could never leave a field, and the Add Playlist
-  dialog was unusable. On TV the field is also read-only until Select, because
-  `EditableText` opens the IME on every focus gain. Off TV it is a plain `TextField`.
+  dialog was unusable. Otherwise the field is left stock (editable, keyboard on focus and
+  tap) and OK calls `requestKeyboard`. Do not make it read-only until OK to stop the
+  keyboard popping on focus: that was tried, passed every widget test, and on a real TV
+  the fields could never be opened for typing. Off TV it is a plain `TextField`.
 - **A VOD card is one focus node.** It used to be three (outer detector, full-bleed `InkWell`,
   favourite button). Traversal prefers the smallest vertical distance, and the next row's
   heart icon sits higher than its card's centre — so D-pad *down* landed on a heart every

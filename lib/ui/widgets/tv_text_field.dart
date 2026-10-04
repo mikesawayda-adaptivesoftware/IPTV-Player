@@ -7,24 +7,23 @@ import '../../core/platform/tv_platform.dart';
 ///
 /// Off TV this is a plain [TextField] and behaves exactly like one.
 ///
-/// On TV a stock [TextField] is a dead end, for two reasons:
+/// On TV a stock [TextField] is a dead end: `DefaultTextEditingShortcuts`
+/// binds the arrow keys to caret movement, and in a single-line field Up/Down
+/// move the caret to the start/end and report the key handled - so the
+/// directional traversal binding further up the tree never sees them. A
+/// remote has no Tab key, so a focused field could only be left with Back,
+/// which closes the whole dialog.
 ///
-/// - **Up/Down never leave it.** `DefaultTextEditingShortcuts` binds the arrow
-///   keys to caret movement, and in a single-line field Up/Down move the caret
-///   to the start/end and report the key handled - so the directional
-///   traversal binding further up the tree never sees them. A remote has no
-///   Tab key, so a focused field could only be left with Back, which closes the
-///   whole dialog.
-/// - **Focus opens the keyboard.** `EditableText` shows the IME whenever it
-///   gains focus, so D-padding down a form of four fields would pop a
-///   full-screen TV keyboard four times on the way to the button.
+/// So on TV this intercepts the D-pad above the field: Up/Down always move
+/// focus, and Left/Right do once the caret is already at that end of the text.
+/// OK asks for the keyboard explicitly.
 ///
-/// So on TV the field is read-only until Select (the remote's OK) is pressed
-/// or the field is tapped, the way native Android TV text fields behave:
-/// focusing it just highlights it, OK opens the keyboard, and Up/Down always
-/// move focus (Left/Right too, until it is being edited). The IME's Next key
-/// carries editing on to the following field so a form can still be filled in
-/// one keyboard session.
+/// The field itself is otherwise left completely stock - editable, and opening
+/// the keyboard on focus and on tap exactly as Flutter does everywhere else.
+/// An earlier version kept it read-only until OK to stop the keyboard popping
+/// on every focus change; on a real TV that never opened for typing at all,
+/// and a working field that shows its keyboard eagerly beats a tidy one that
+/// cannot be typed into.
 class TvTextField extends StatefulWidget {
   final TextEditingController controller;
   final InputDecoration? decoration;
@@ -52,54 +51,18 @@ class TvTextField extends StatefulWidget {
 }
 
 class _TvTextFieldState extends State<TvTextField> {
-  /// Set when the IME's Next key moves focus out of a field, so the field that
-  /// receives focus opens its keyboard straight away instead of making the
-  /// user press OK again. Cleared after the frame whatever got focus, so a
-  /// button landing the focus cannot leave it armed for a later field.
-  static bool _continueEditing = false;
-
   final FocusNode _focusNode = FocusNode();
+  final GlobalKey _fieldKey = GlobalKey();
 
-  /// Whether the keyboard is allowed: false means read-only and no IME.
-  bool _editing = false;
-
-  /// Select was pressed while this field had focus, so its key-up is ours.
+  /// Select went down while this field had focus, so its key-up is ours. A
+  /// key-up without one (the OK press that opened the dialog, landing on the
+  /// autofocused field) is swallowed and does nothing.
   bool _selectDown = false;
 
   @override
-  void initState() {
-    super.initState();
-    _focusNode.addListener(_onFocusChange);
-  }
-
-  @override
   void dispose() {
-    _focusNode.removeListener(_onFocusChange);
     _focusNode.dispose();
     super.dispose();
-  }
-
-  void _onFocusChange() {
-    if (!kIsTv) return;
-    if (_focusNode.hasFocus) {
-      if (_continueEditing) {
-        _continueEditing = false;
-        setState(() => _editing = true);
-      }
-    } else if (_editing) {
-      setState(() => _editing = false);
-    }
-  }
-
-  /// Select on the remote, or a tap / click on the field.
-  void _beginEditing() {
-    if (_editing) {
-      // Back dismisses the IME but leaves the field connected; OK should
-      // bring the keyboard back rather than do nothing.
-      SystemChannels.textInput.invokeMethod<void>('TextInput.show');
-    } else {
-      setState(() => _editing = true);
-    }
   }
 
   static bool _isSelect(LogicalKeyboardKey key) =>
@@ -107,21 +70,43 @@ class _TvTextFieldState extends State<TvTextField> {
       key == LogicalKeyboardKey.enter ||
       key == LogicalKeyboardKey.numpadEnter;
 
+  EditableTextState? _editable() {
+    EditableTextState? found;
+    void visit(Element element) {
+      if (found != null) return;
+      if (element is StatefulElement && element.state is EditableTextState) {
+        found = element.state as EditableTextState;
+        return;
+      }
+      element.visitChildren(visit);
+    }
+
+    (_fieldKey.currentContext as Element?)?.visitChildren(visit);
+    return found;
+  }
+
+  /// The same call a tap makes: opens the input connection if it is not open
+  /// and shows the keyboard either way, including after Back dismissed it.
+  void _showKeyboard() => _editable()?.requestKeyboard();
+
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     // Keys from a focusable inside the decoration (a search field's clear
     // button) bubble through here too; those are not ours to reinterpret.
     if (!_focusNode.hasPrimaryFocus) return KeyEventResult.ignored;
 
     final key = event.logicalKey;
+    final selection = widget.controller.selection;
+    final text = widget.controller.text;
+    final atStart =
+        !selection.isValid || (selection.isCollapsed && selection.start == 0);
+    final atEnd = !selection.isValid ||
+        (selection.isCollapsed && selection.end == text.length);
 
-    // Up/Down always leave the field. Left/Right do too until the field is
-    // being edited - before that a caret has nothing to do, and a search
-    // field beside the navigation rail would otherwise be a dead end.
     final direction = switch (key) {
       LogicalKeyboardKey.arrowUp => TraversalDirection.up,
       LogicalKeyboardKey.arrowDown => TraversalDirection.down,
-      LogicalKeyboardKey.arrowLeft when !_editing => TraversalDirection.left,
-      LogicalKeyboardKey.arrowRight when !_editing => TraversalDirection.right,
+      LogicalKeyboardKey.arrowLeft when atStart => TraversalDirection.left,
+      LogicalKeyboardKey.arrowRight when atEnd => TraversalDirection.right,
       _ => null,
     };
     if (direction != null) {
@@ -130,14 +115,14 @@ class _TvTextFieldState extends State<TvTextField> {
     }
 
     if (_isSelect(key)) {
-      // Acts on key-up, as a native Android TV text field does. Opening the
-      // keyboard on key-down left the up to arrive after the input connection
-      // existed, where Android hands it to the IME instead of the app.
+      // Acts on key-up, as a native Android TV text field does, and claims
+      // both edges so neither reaches the input connection as an editor
+      // action.
       if (event is KeyDownEvent) {
         _selectDown = true;
       } else if (event is KeyUpEvent && _selectDown) {
         _selectDown = false;
-        _beginEditing();
+        _showKeyboard();
       }
       return KeyEventResult.handled;
     }
@@ -148,26 +133,20 @@ class _TvTextFieldState extends State<TvTextField> {
   void _onEditingComplete() {
     switch (widget.textInputAction) {
       case TextInputAction.next:
-        _continueEditing = true;
-        WidgetsBinding.instance
-            .addPostFrameCallback((_) => _continueEditing = false);
         _focusNode.nextFocus();
       case TextInputAction.previous:
-        _continueEditing = true;
-        WidgetsBinding.instance
-            .addPostFrameCallback((_) => _continueEditing = false);
         _focusNode.previousFocus();
       default:
-        // Keep focus on the field so the D-pad has somewhere to start from;
-        // the default would unfocus and strand it. Dropping out of editing
-        // closes the keyboard.
-        setState(() => _editing = false);
+        // The default unfocuses, which on a remote strands the D-pad with
+        // nothing to move from. Keep focus and just put the keyboard away.
+        SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final field = TextField(
+      key: _fieldKey,
       controller: widget.controller,
       focusNode: _focusNode,
       decoration: widget.decoration,
@@ -177,13 +156,7 @@ class _TvTextFieldState extends State<TvTextField> {
       textInputAction: widget.textInputAction,
       onChanged: widget.onChanged,
       onSubmitted: widget.onSubmitted,
-      readOnly: kIsTv && !_editing,
-      showCursor: kIsTv ? _editing : null,
       onEditingComplete: kIsTv ? _onEditingComplete : null,
-      // A read-only field swallows taps without opening anything, so a pointer
-      // (a desktop in forced TV mode, a TV air mouse, a touch panel) needs
-      // the same way in as Select.
-      onTap: kIsTv ? _beginEditing : null,
     );
 
     if (!kIsTv) return field;
