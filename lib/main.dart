@@ -6,6 +6,7 @@ import 'package:media_kit/media_kit.dart';
 import 'app.dart';
 import 'core/constants/app_constants.dart';
 import 'core/platform/tv_platform.dart';
+import 'core/player/video_output.dart';
 import 'data/models/channel.dart';
 import 'data/models/vod_item.dart';
 import 'data/models/playlist_source.dart';
@@ -55,6 +56,14 @@ void main() async {
   print('Device type: ${isTv ? "TV (D-pad)" : "touch/pointer"}'
       '${override == TvModeOverride.auto ? "" : " [overridden: ${override.name}]"}');
 
+  // Latched like kIsTv: every player reads it when it builds its
+  // VideoController, including the mini player, which has no widget ref.
+  VideoOutput.preference = _videoOutputSetting(
+      settings.get(AppConstants.settingVideoOutput), VideoOutput.auto);
+  VideoOutput.learned = _videoOutputSetting(
+      settings.get(AppConstants.settingVideoOutputLearned),
+      VideoOutput.hardware);
+
   // No ProviderScope overrides needed: isTvProvider and tvModeOverrideProvider
   // both read what has already been latched above, so there is one source of
   // truth and the provider and the global cannot disagree.
@@ -65,3 +74,11 @@ void main() async {
   );
 }
 
+
+/// Defensive against a stale index from a build with a different enum.
+VideoOutput _videoOutputSetting(Object? raw, VideoOutput fallback) {
+  if (raw is! int || raw < 0 || raw >= VideoOutput.values.length) {
+    return fallback;
+  }
+  return VideoOutput.values[raw];
+}

@@ -81,5 +81,17 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!--
+          Skia rather than Impeller. Video is drawn by mpv into a Flutter
+          SurfaceProducer; under Impeller that is composited through Vulkan and
+          hardware buffers, which the GPU drivers on cheap TV boxes are the
+          least reliable at. A frame lost there plays as sound over a black
+          screen with mpv reporting nothing wrong, so it cannot be detected and
+          worked around from Dart the way an mpv output failure can.
+        -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
     </application>
 </manifest>

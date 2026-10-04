@@ -27,6 +27,8 @@ class AppConstants {
   static const String settingAutoReconnect = 'auto_reconnect';
   static const String settingQualityPolicy = 'quality_policy';
   static const String settingTvModeOverride = 'tv_mode_override';
+  static const String settingVideoOutput = 'video_output';
+  static const String settingVideoOutputLearned = 'video_output_learned';
 
   // Cache durations
   static const Duration epgCacheDuration = Duration(hours: 12);
