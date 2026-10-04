@@ -1,29 +1,37 @@
 import 'package:flutter/material.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/extensions.dart';
+import '../../core/utils/network_errors.dart';
 
 class AppErrorWidget extends StatelessWidget {
   final String message;
   final VoidCallback? onRetry;
 
+  /// Optional way out when retrying will not help, e.g. wrong credentials.
+  final String? secondaryLabel;
+  final VoidCallback? onSecondary;
+
   const AppErrorWidget({
     super.key,
     required this.message,
     this.onRetry,
+    this.secondaryLabel,
+    this.onSecondary,
   });
 
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(32),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: AppTheme.errorColor.withOpacity(0.1),
+                color: AppTheme.errorColor.withValues(alpha: 0.1),
                 shape: BoxShape.circle,
               ),
               child: const Icon(
@@ -39,19 +47,38 @@ class AppErrorWidget extends StatelessWidget {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 12),
-            Text(
-              message,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: AppTheme.textSecondary,
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480),
+              child: Text(
+                userFacingError(message),
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: AppTheme.textSecondary,
+                    ),
+                textAlign: TextAlign.center,
               ),
-              textAlign: TextAlign.center,
             ),
-            if (onRetry != null) ...[
+            if (onRetry != null || onSecondary != null) ...[
               const SizedBox(height: 24),
-              ElevatedButton.icon(
-                onPressed: onRetry,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Try Again'),
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  if (onRetry != null)
+                    ElevatedButton.icon(
+                      // On a remote, nothing is focused once the content
+                      // that held focus is replaced by this screen.
+                      autofocus: context.isTv,
+                      onPressed: onRetry,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Try Again'),
+                    ),
+                  if (onSecondary != null && secondaryLabel != null)
+                    OutlinedButton(
+                      onPressed: onSecondary,
+                      child: Text(secondaryLabel!),
+                    ),
+                ],
               ),
             ],
           ],
@@ -60,4 +87,3 @@ class AppErrorWidget extends StatelessWidget {
     );
   }
 }
-

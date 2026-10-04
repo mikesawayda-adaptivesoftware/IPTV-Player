@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 
 import '../platform/tv_platform.dart';
 
@@ -56,6 +57,11 @@ extension DateTimeExtensions on DateTime {
     final tomorrow = DateTime.now().add(const Duration(days: 1));
     return year == tomorrow.year && month == tomorrow.month && day == tomorrow.day;
   }
+}
+
+extension IntExtensions on int {
+  /// Thousands-separated, for counts: 53198 -> 53,198.
+  String get grouped => NumberFormat.decimalPattern().format(this);
 }
 
 extension DurationExtensions on Duration {

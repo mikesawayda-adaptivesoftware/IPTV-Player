@@ -23,10 +23,10 @@ class Category extends Equatable {
   }
 
   /// Create "All" category
-  factory Category.all({int? count}) {
+  factory Category.all({int? count, String name = 'All Channels'}) {
     return Category(
       id: 'all',
-      name: 'All Channels',
+      name: name,
       channelCount: count,
     );
   }

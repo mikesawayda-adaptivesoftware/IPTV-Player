@@ -8,6 +8,8 @@ import '../../data/models/channel.dart';
 import '../../data/models/epg_program.dart';
 import '../../providers/playlist_provider.dart';
 import '../player/enhanced_video_player.dart';
+import '../../providers/navigation_provider.dart';
+import '../widgets/empty_state.dart';
 import '../widgets/loading_widget.dart';
 import '../widgets/mini_player.dart';
 import '../widgets/tv_text_field.dart';
@@ -135,7 +137,7 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
                     ref.read(epgStateProvider.notifier).loadEPG(activePlaylist.effectiveEpgUrl);
                   }
                 },
-                tooltip: 'Refresh EPG',
+                tooltip: 'Refresh guide',
               ),
               IconButton(
                 icon: const Icon(Icons.today),
@@ -404,7 +406,7 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
                     overflow: TextOverflow.ellipsis,
                   ),
                   subtitle: Text(
-                    current?.title ?? 'No programme information',
+                    current?.title ?? 'No program information',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -430,7 +432,7 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
             child: programs.isEmpty
                 ? Center(
                     child: Text(
-                      'No programme information for ${selected.name}',
+                      'No program information for ${selected.name}',
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
                   )
@@ -795,68 +797,32 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
   }
 
   Widget _buildNoPlaylistView() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.playlist_add,
-            size: 64,
-            color: AppTheme.textMuted.withOpacity(0.5),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'No playlist configured',
-            style: Theme.of(context).textTheme.headlineSmall,
-          ),
-        ],
-      ),
+    return EmptyState(
+      icon: Icons.playlist_add,
+      title: 'No playlist yet',
+      message: 'Add a playlist to see what is on.',
+      actionLabel: 'Add a playlist',
+      actionIcon: Icons.add,
+      onAction: () =>
+          ref.read(homeTabProvider.notifier).state = HomeTab.settings,
     );
   }
 
   Widget _buildEmptyView() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.calendar_today,
-            size: 64,
-            color: AppTheme.textMuted.withOpacity(0.5),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'No channels loaded',
-            style: Theme.of(context).textTheme.headlineSmall,
-          ),
-        ],
-      ),
+    return const EmptyState(
+      icon: Icons.calendar_today,
+      title: 'No channels loaded',
+      message: 'The guide fills in once your playlist has loaded.',
     );
   }
 
   Widget _buildNoEPGDataView() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.event_busy,
-            size: 64,
-            color: AppTheme.textMuted.withOpacity(0.5),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'No EPG data available',
-            style: Theme.of(context).textTheme.headlineSmall,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'EPG data may still be loading or not available for your playlist',
-            style: Theme.of(context).textTheme.bodyMedium,
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
+    return const EmptyState(
+      icon: Icons.event_busy,
+      title: 'No guide data',
+      message: 'The guide may still be downloading - large guides take a '
+          'minute. If it never appears, your provider may not publish one; '
+          'for an M3U playlist, add an EPG URL when adding it in Settings.',
     );
   }
 }

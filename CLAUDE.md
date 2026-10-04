@@ -85,6 +85,11 @@ lib/
 | `miniPlayerProvider` | in `ui/widgets/mini_player.dart` | owns its own `Player` |
 | `bufferModeProvider`, `autoReconnectProvider`, `qualityPolicyProvider` | in `ui/player/enhanced_video_player.dart` | |
 
+`homeTabProvider` (`providers/navigation_provider.dart`) is the shell's selected tab, so
+empty states can send the user to Settings. `HomeScreen` `ref.listen`s the active playlist's
+id and reloads channels, movies and the guide whenever it changes - adding the first playlist,
+activating another, deleting the active one. Don't add a second reload at a call site.
+
 Note: providers live next to their UI in two cases (mini player, buffer settings). That's
 existing convention, not an accident to "fix".
 
@@ -486,7 +491,8 @@ the README. EPG comes solely from XMLTV, never from the Xtream EPG endpoints.
 - ~80 lint infos, mostly deprecated `withOpacity` and missing `const`. `flutter analyze`
   reports **no errors**; the single warning is a pre-existing unused `_selectedChannelId`
   field in `epg_screen.dart`. Don't add new errors or warnings.
-- `test/` covers the recovery ladder, URL fallback and quality grouping. The only widget
+- `test/` covers the recovery ladder, URL fallback, quality grouping and the user-facing
+  network error text (`core/utils/network_errors.dart`). The only widget
   test is `tv_text_field_test.dart`; the stock `widget_test.dart` template was removed.
 - Android release builds are signed with **debug keys** and `applicationId` is still
   `com.example.iptv_player`. Both are marked TODO in `android/app/build.gradle.kts`.

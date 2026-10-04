@@ -8,6 +8,7 @@ import '../../core/utils/extensions.dart';
 import '../../data/models/playlist_source.dart';
 import '../../data/services/storage_service.dart';
 import '../../core/platform/tv_platform.dart';
+import '../../providers/navigation_provider.dart';
 import '../../providers/playlist_provider.dart';
 import '../../providers/tv_provider.dart';
 import '../player/enhanced_video_player.dart';
@@ -87,10 +88,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ...playlistSources.map((source) => _PlaylistTile(
               source: source,
               isActive: activePlaylist?.id == source.id,
-              onActivate: () {
-                ref.read(playlistSourcesProvider.notifier).setActive(source.id);
-                _reloadData(source);
-              },
+              // HomeScreen reloads channels, movies and the guide whenever
+              // the active playlist changes, so there is nothing to kick here.
+              onActivate: () =>
+                  ref.read(playlistSourcesProvider.notifier).setActive(source.id),
               onDelete: () => _confirmDeletePlaylist(source),
             )),
 
@@ -127,20 +128,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         ),
                       ),
                       const SizedBox(width: 16),
-                      const Expanded(
+                      Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              'Definitely Not Cable',
+                            const Text(
+                              AppConstants.appName,
                               style: TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
                             Text(
-                              'Version 1.0.0',
-                              style: TextStyle(
+                              'Version ${AppConstants.appVersion}',
+                              style: const TextStyle(
                                 color: AppTheme.textSecondary,
                               ),
                             ),
@@ -330,8 +331,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               dense: true,
             )),
 
+            // Shortcut cheat-sheet. Keyboard keys mean nothing on a phone, and
+            // on TV the remote is the input, so each gets its own text.
+            if (context.isDesktop || context.isTv) ...[
             const Divider(height: 32),
-            
+
             // Info box
             Container(
               padding: const EdgeInsets.all(12),
@@ -347,13 +351,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text(
-                          'Keyboard Shortcuts in Player',
-                          style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                        Text(
+                          context.isTv
+                              ? 'Remote Control in Player'
+                              : 'Keyboard Shortcuts in Player',
+                          style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'R = Manual reconnect • Q = Stream quality • I = Stream stats • Space = Play/Pause • ↑↓ = Change channel • M = Mute • F = Fullscreen',
+                          context.isTv
+                              ? 'OK = Show controls / Play/Pause • ↑↓ or CH+/CH- = Change channel • ←→ = Move between controls • Back = Minimise'
+                              : 'R = Manual reconnect • Q = Stream quality • I = Stream stats • Space = Play/Pause • ↑↓ = Change channel • M = Mute • F = Fullscreen',
                           style: TextStyle(fontSize: 11, color: AppTheme.textMuted),
                         ),
                       ],
@@ -362,6 +370,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ],
               ),
             ),
+            ],
           ],
         ),
       ),
@@ -401,23 +410,33 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final urlController = TextEditingController();
     final epgController = TextEditingController();
 
+    String? error;
+
     showDialog(
       context: context,
-      builder: (context) {
+      builder: (context) => StatefulBuilder(builder: (context, setDialogState) {
         void submit() {
-          if (nameController.text.isNotEmpty && urlController.text.isNotEmpty) {
-            ref.read(playlistSourcesProvider.notifier).addM3UPlaylist(
-              nameController.text,
-              urlController.text,
-              epgUrl: epgController.text.isEmpty ? null : epgController.text,
-            );
-            Navigator.pop(context);
+          final url = _normaliseUrl(urlController.text);
+          if (url.isEmpty) {
+            setDialogState(() => error = 'Enter the playlist URL');
+            return;
           }
+          final epg = _normaliseUrl(epgController.text);
+          final name = nameController.text.trim();
+          final isFirst = ref.read(playlistSourcesProvider).isEmpty;
+          ref.read(playlistSourcesProvider.notifier).addM3UPlaylist(
+            name.isEmpty ? (Uri.tryParse(url)?.host ?? 'My Playlist') : name,
+            url,
+            epgUrl: epg.isEmpty ? null : epg,
+          );
+          Navigator.pop(context);
+          _onPlaylistAdded(isFirst: isFirst);
         }
 
         return AlertDialog(
           title: Text(isUrl ? 'Add M3U URL' : 'Add M3U Playlist'),
-          content: Column(
+          content: SingleChildScrollView(
+            child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               TvTextField(
@@ -425,7 +444,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 autofocus: context.isTv,
                 textInputAction: TextInputAction.next,
                 decoration: const InputDecoration(
-                  labelText: 'Playlist Name',
+                  labelText: 'Playlist Name (Optional)',
                   hintText: 'My IPTV',
                 ),
               ),
@@ -450,7 +469,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   hintText: 'http://example.com/epg.xml',
                 ),
               ),
+              if (error != null) _DialogError(error!),
             ],
+          ),
           ),
           actions: [
             TextButton(
@@ -463,7 +484,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ],
         );
-      },
+      }),
     );
   }
 
@@ -473,27 +494,43 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final usernameController = TextEditingController();
     final passwordController = TextEditingController();
 
+    String? error;
+    var obscurePassword = true;
+
     showDialog(
       context: context,
-      builder: (context) {
+      builder: (context) => StatefulBuilder(builder: (context, setDialogState) {
         void submit() {
-          if (nameController.text.isNotEmpty &&
-              serverController.text.isNotEmpty &&
-              usernameController.text.isNotEmpty &&
-              passwordController.text.isNotEmpty) {
-            ref.read(playlistSourcesProvider.notifier).addXtreamPlaylist(
-              nameController.text,
-              serverController.text,
-              usernameController.text,
-              passwordController.text,
-            );
-            Navigator.pop(context);
+          final server = _normaliseUrl(serverController.text);
+          // Usernames and passwords keep inner spaces but lose the trailing
+          // one an on-screen keyboard's autocomplete loves to add.
+          final username = usernameController.text.trim();
+          final password = passwordController.text.trim();
+          final missing = [
+            if (server.isEmpty) 'server URL',
+            if (username.isEmpty) 'username',
+            if (password.isEmpty) 'password',
+          ];
+          if (missing.isNotEmpty) {
+            setDialogState(() => error = 'Enter the ${missing.join(', ')}');
+            return;
           }
+          final name = nameController.text.trim();
+          final isFirst = ref.read(playlistSourcesProvider).isEmpty;
+          ref.read(playlistSourcesProvider.notifier).addXtreamPlaylist(
+            name.isEmpty ? (Uri.tryParse(server)?.host ?? 'My Provider') : name,
+            server,
+            username,
+            password,
+          );
+          Navigator.pop(context);
+          _onPlaylistAdded(isFirst: isFirst);
         }
 
         return AlertDialog(
           title: const Text('Add Xtream Playlist'),
-          content: Column(
+          content: SingleChildScrollView(
+            child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               TvTextField(
@@ -501,7 +538,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 autofocus: context.isTv,
                 textInputAction: TextInputAction.next,
                 decoration: const InputDecoration(
-                  labelText: 'Playlist Name',
+                  labelText: 'Playlist Name (Optional)',
                   hintText: 'My Provider',
                 ),
               ),
@@ -528,12 +565,24 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 controller: passwordController,
                 textInputAction: TextInputAction.done,
                 onSubmitted: (_) => submit(),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Password',
+                  // Typing a password with a remote is error-prone enough
+                  // without doing it blind.
+                  suffixIcon: IconButton(
+                    icon: Icon(obscurePassword
+                        ? Icons.visibility_outlined
+                        : Icons.visibility_off_outlined),
+                    tooltip: obscurePassword ? 'Show password' : 'Hide password',
+                    onPressed: () => setDialogState(
+                        () => obscurePassword = !obscurePassword),
+                  ),
                 ),
-                obscureText: true,
+                obscureText: obscurePassword,
               ),
+              if (error != null) _DialogError(error!),
             ],
+          ),
           ),
           actions: [
             TextButton(
@@ -546,8 +595,31 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ],
         );
-      },
+      }),
     );
+  }
+
+  /// Trims what was typed and assumes `http://` when no scheme was given -
+  /// providers hand out `server.tld:8080`, and Dio rejects a URL without one.
+  static String _normaliseUrl(String input) {
+    final url = input.trim();
+    if (url.isEmpty) return url;
+    if (RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*://').hasMatch(url)) return url;
+    return 'http://$url';
+  }
+
+  /// Confirms the add and takes the user to the channel list, which the shell
+  /// is already loading because the active playlist changed.
+  void _onPlaylistAdded({required bool isFirst}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(isFirst
+            ? 'Playlist added - loading channels'
+            : 'Playlist added. Activate it below to switch to it.'),
+      ),
+    );
+    if (isFirst) ref.read(homeTabProvider.notifier).state = HomeTab.liveTv;
   }
 
   Future<void> _pickM3UFile() async {
@@ -564,7 +636,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     if (path == null) return;
 
     final name = picked.name.replaceAll(RegExp(r'\.(m3u8?|M3U8?)$'), '');
-    ref.read(playlistSourcesProvider.notifier).addM3UPlaylist(name, path);
+    _onPlaylistAdded(isFirst: ref.read(playlistSourcesProvider).isEmpty);
+    await ref.read(playlistSourcesProvider.notifier).addM3UPlaylist(name, path);
   }
 
   void _confirmDeletePlaylist(PlaylistSource source) {
@@ -593,11 +666,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  void _reloadData(PlaylistSource source) {
-    ref.read(channelStateProvider.notifier).loadChannels(source);
-    ref.read(vodStateProvider.notifier).loadVOD(source);
-    ref.read(epgStateProvider.notifier).loadEPG(source.effectiveEpgUrl);
-  }
 }
 
 class _ActionCard extends StatelessWidget {
@@ -660,6 +728,14 @@ class _PlaylistTile extends StatelessWidget {
     required this.onDelete,
   });
 
+  /// Where the playlist comes from, without path, query or credentials: the
+  /// host for anything remote, the file name for a local file.
+  static String _location(PlaylistSource source) {
+    final uri = Uri.tryParse(source.url);
+    if (uri != null && uri.host.isNotEmpty) return uri.host;
+    return source.url.split(RegExp(r'[/\\]')).last;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -679,13 +755,16 @@ class _PlaylistTile extends StatelessWidget {
         title: Text(
           source.name,
           style: const TextStyle(fontWeight: FontWeight.w500),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
         ),
+        // Host only. An M3U URL is usually `get.php?username=..&password=..`,
+        // and this screen is exactly what someone screenshots for help.
         subtitle: Text(
-          source.type == PlaylistType.xtream 
-              ? 'Xtream Codes' 
-              : source.url.length > 40 
-                  ? '${source.url.substring(0, 40)}...'
-                  : source.url,
+          '${source.type == PlaylistType.xtream ? 'Xtream Codes' : 'M3U'}'
+          '${_location(source).isEmpty ? '' : ' • ${_location(source)}'}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
           style: TextStyle(
             fontSize: 12,
             color: AppTheme.textMuted,
@@ -719,6 +798,7 @@ class _PlaylistTile extends StatelessWidget {
               icon: const Icon(Icons.delete_outline),
               onPressed: onDelete,
               color: AppTheme.errorColor,
+              tooltip: 'Delete playlist',
             ),
           ],
         ),
@@ -727,3 +807,29 @@ class _PlaylistTile extends StatelessWidget {
   }
 }
 
+
+/// Inline validation message under an add-playlist form.
+class _DialogError extends StatelessWidget {
+  final String message;
+
+  const _DialogError(this.message);
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 16),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline, color: AppTheme.errorColor, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(color: AppTheme.errorColor, fontSize: 13),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

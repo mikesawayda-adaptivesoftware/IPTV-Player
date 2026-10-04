@@ -10,7 +10,9 @@ import '../../data/models/vod_item.dart';
 import '../../data/models/playlist_source.dart';
 import '../../providers/playlist_provider.dart';
 import '../player/video_player_screen.dart';
+import '../../providers/navigation_provider.dart';
 import '../widgets/category_sidebar.dart';
+import '../widgets/empty_state.dart';
 import '../widgets/search_bar_widget.dart';
 import '../widgets/loading_widget.dart';
 import '../widgets/error_widget.dart';
@@ -47,6 +49,9 @@ class _VODScreenState extends ConsumerState<VODScreen> {
       return AppErrorWidget(
         message: vodState.error!,
         onRetry: () => ref.read(vodStateProvider.notifier).loadVOD(activePlaylist),
+        secondaryLabel: 'Playlist settings',
+        onSecondary: () =>
+            ref.read(homeTabProvider.notifier).state = HomeTab.settings,
       );
     }
 
@@ -79,7 +84,7 @@ class _VODScreenState extends ConsumerState<VODScreen> {
               // VOD grid
               Expanded(
                 child: filteredItems.isEmpty
-                    ? _buildEmptyView()
+                    ? _buildEmptyView(vodState)
                     : _buildVODGrid(filteredItems),
               ),
             ],
@@ -102,11 +107,11 @@ class _VODScreenState extends ConsumerState<VODScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Movies & Series',
+                      'Movies',
                       style: Theme.of(context).textTheme.displaySmall,
                     ),
                     Text(
-                      '$itemCount titles available',
+                      '${itemCount.grouped} ${itemCount == 1 ? 'title' : 'titles'}',
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
                   ],
@@ -126,7 +131,7 @@ class _VODScreenState extends ConsumerState<VODScreen> {
           ),
           const SizedBox(height: 16),
           SearchBarWidget(
-            hintText: 'Search movies & series...',
+            hintText: 'Search movies...',
             onChanged: (query) {
               setState(() => _searchQuery = query);
             },
@@ -196,78 +201,48 @@ class _VODScreenState extends ConsumerState<VODScreen> {
   }
 
   Widget _buildNoPlaylistView() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.playlist_add,
-            size: 64,
-            color: AppTheme.textMuted.withOpacity(0.5),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'No playlist configured',
-            style: Theme.of(context).textTheme.headlineSmall,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Go to Settings to add an Xtream playlist',
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
-        ],
-      ),
+    return EmptyState(
+      icon: Icons.playlist_add,
+      title: 'No playlist yet',
+      message: 'Add an Xtream Codes login to browse movies.',
+      actionLabel: 'Add a playlist',
+      actionIcon: Icons.add,
+      onAction: () =>
+          ref.read(homeTabProvider.notifier).state = HomeTab.settings,
     );
   }
 
   Widget _buildXtreamOnlyView() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.movie_outlined,
-            size: 64,
-            color: AppTheme.textMuted.withOpacity(0.5),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'VOD Not Available',
-            style: Theme.of(context).textTheme.headlineSmall,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Video on Demand is only available with Xtream playlists',
-            style: Theme.of(context).textTheme.bodyMedium,
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
+    return const EmptyState(
+      icon: Icons.movie_outlined,
+      title: 'Movies need an Xtream login',
+      message: 'M3U playlists only carry live channels. Add your provider as '
+          'an Xtream Codes source in Settings to browse their movies.',
     );
   }
 
-  Widget _buildEmptyView() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.search_off,
-            size: 64,
-            color: AppTheme.textMuted.withOpacity(0.5),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'No movies found',
-            style: Theme.of(context).textTheme.headlineSmall,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Try adjusting your search or category filter',
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
-        ],
-      ),
+  Widget _buildEmptyView(VODState state) {
+    if (_searchQuery.isNotEmpty) {
+      return EmptyState(
+        icon: Icons.search_off,
+        title: 'No matches for "$_searchQuery"',
+        message: state.selectedCategoryId == null ||
+                state.selectedCategoryId == 'all'
+            ? 'Check the spelling, or try part of the title.'
+            : 'Only this category was searched. Try All Movies.',
+      );
+    }
+    if (state.selectedCategoryId == 'favorites') {
+      return const EmptyState(
+        icon: Icons.favorite_border,
+        title: 'No favorite movies yet',
+        message: 'Tap the heart on any poster to keep it here.',
+      );
+    }
+    return const EmptyState(
+      icon: Icons.movie_outlined,
+      title: 'No movies here',
+      message: 'This category is empty. Try another one, or refresh.',
     );
   }
 
@@ -447,6 +422,9 @@ class _VODCard extends StatelessWidget {
       return CachedNetworkImage(
         imageUrl: item.posterUrl!,
         fit: BoxFit.cover,
+        // Decode near display size; provider posters are often 1000px+ and
+        // a scrolled grid of them is a lot of memory on a TV box.
+        memCacheWidth: 400,
         placeholder: (context, url) => Container(
           color: AppTheme.surfaceColor,
           child: const Center(
