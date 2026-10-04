@@ -39,6 +39,12 @@ void main() {
   bool focused(WidgetTester tester, int i) =>
       field(tester, i).focusNode!.hasPrimaryFocus;
 
+  Future<void> hideKeyboard(WidgetTester tester) async {
+    await SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+    await tester.pump();
+    expect(tester.testTextInput.isVisible, isFalse);
+  }
+
   testWidgets('Down walks the fields and reaches the button', (tester) async {
     await pumpForm(tester);
     expect(focused(tester, 0), isTrue);
@@ -57,35 +63,47 @@ void main() {
     expect(focused(tester, 2), isTrue);
   });
 
-  testWidgets('Focus alone does not open the keyboard; Select does',
-      (tester) async {
+  testWidgets('Fields are editable and accept typing', (tester) async {
     await pumpForm(tester);
-    expect(field(tester, 0).readOnly, isTrue);
-    expect(tester.testTextInput.isVisible, isFalse);
-
-    await tester.sendKeyEvent(LogicalKeyboardKey.select);
-    await tester.pumpAndSettle();
     expect(field(tester, 0).readOnly, isFalse);
-    expect(tester.testTextInput.isVisible, isTrue);
 
     tester.testTextInput.enterText('my provider');
     await tester.pump();
     expect(controllers[0].text, 'my provider');
 
-    // Still leaves the field while editing.
+    // Still leaves the field with text in it.
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
     await tester.pumpAndSettle();
     expect(focused(tester, 1), isTrue);
-    expect(field(tester, 0).readOnly, isTrue);
-    expect(field(tester, 1).readOnly, isTrue);
   });
 
-  testWidgets('A tap opens the keyboard too', (tester) async {
+  testWidgets('OK brings the keyboard back after it was dismissed',
+      (tester) async {
+    await pumpForm(tester);
+    await hideKeyboard(tester);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.select);
+    await tester.pumpAndSettle();
+    expect(tester.testTextInput.isVisible, isTrue);
+    expect(focused(tester, 0), isTrue);
+  });
+
+  testWidgets('A stray OK release does not open the keyboard', (tester) async {
+    await pumpForm(tester);
+    await hideKeyboard(tester);
+
+    // The release of the OK press that opened the dialog lands on the
+    // autofocused field without its key-down.
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.select);
+    await tester.pumpAndSettle();
+    expect(tester.testTextInput.isVisible, isFalse);
+  });
+
+  testWidgets('A tap opens the keyboard', (tester) async {
     await pumpForm(tester);
     await tester.tap(find.byType(TextField).at(1));
     await tester.pumpAndSettle();
     expect(focused(tester, 1), isTrue);
-    expect(field(tester, 1).readOnly, isFalse);
     expect(tester.testTextInput.isVisible, isTrue);
 
     tester.testTextInput.enterText('http://server:8080');
