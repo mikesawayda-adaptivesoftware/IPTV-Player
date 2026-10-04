@@ -79,4 +79,17 @@ void main() {
     expect(field(tester, 0).readOnly, isTrue);
     expect(field(tester, 1).readOnly, isTrue);
   });
+
+  testWidgets('A tap opens the keyboard too', (tester) async {
+    await pumpForm(tester);
+    await tester.tap(find.byType(TextField).at(1));
+    await tester.pumpAndSettle();
+    expect(focused(tester, 1), isTrue);
+    expect(field(tester, 1).readOnly, isFalse);
+    expect(tester.testTextInput.isVisible, isTrue);
+
+    tester.testTextInput.enterText('http://server:8080');
+    await tester.pump();
+    expect(controllers[1].text, 'http://server:8080');
+  });
 }

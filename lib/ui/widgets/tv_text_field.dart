@@ -19,10 +19,10 @@ import '../../core/platform/tv_platform.dart';
 ///   gains focus, so D-padding down a form of four fields would pop a
 ///   full-screen TV keyboard four times on the way to the button.
 ///
-/// So on TV the field is read-only until Select (the remote's OK) is pressed,
-/// the way native Android TV text fields behave: focusing it just highlights
-/// it, OK opens the keyboard, and Up/Down always move focus (Left/Right too,
-/// until it is being edited). The IME's Next key
+/// So on TV the field is read-only until Select (the remote's OK) is pressed
+/// or the field is tapped, the way native Android TV text fields behave:
+/// focusing it just highlights it, OK opens the keyboard, and Up/Down always
+/// move focus (Left/Right too, until it is being edited). The IME's Next key
 /// carries editing on to the following field so a form can still be filled in
 /// one keyboard session.
 class TvTextField extends StatefulWidget {
@@ -63,6 +63,9 @@ class _TvTextFieldState extends State<TvTextField> {
   /// Whether the keyboard is allowed: false means read-only and no IME.
   bool _editing = false;
 
+  /// Select was pressed while this field had focus, so its key-up is ours.
+  bool _selectDown = false;
+
   @override
   void initState() {
     super.initState();
@@ -85,6 +88,17 @@ class _TvTextFieldState extends State<TvTextField> {
       }
     } else if (_editing) {
       setState(() => _editing = false);
+    }
+  }
+
+  /// Select on the remote, or a tap / click on the field.
+  void _beginEditing() {
+    if (_editing) {
+      // Back dismisses the IME but leaves the field connected; OK should
+      // bring the keyboard back rather than do nothing.
+      SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+    } else {
+      setState(() => _editing = true);
     }
   }
 
@@ -116,19 +130,15 @@ class _TvTextFieldState extends State<TvTextField> {
     }
 
     if (_isSelect(key)) {
+      // Acts on key-up, as a native Android TV text field does. Opening the
+      // keyboard on key-down left the up to arrive after the input connection
+      // existed, where Android hands it to the IME instead of the app.
       if (event is KeyDownEvent) {
-        if (_editing) {
-          // Back dismisses the IME but leaves the field connected; OK should
-          // bring the keyboard back rather than do nothing.
-          SystemChannels.textInput.invokeMethod<void>('TextInput.show');
-        } else {
-          setState(() => _editing = true);
-        }
-        return KeyEventResult.handled;
+        _selectDown = true;
+      } else if (event is KeyUpEvent && _selectDown) {
+        _selectDown = false;
+        _beginEditing();
       }
-      // Key-up and repeats are consumed too: an unclaimed up would reach the
-      // now-connected field, where Android's input connection treats it as an
-      // editor action.
       return KeyEventResult.handled;
     }
 
@@ -170,6 +180,10 @@ class _TvTextFieldState extends State<TvTextField> {
       readOnly: kIsTv && !_editing,
       showCursor: kIsTv ? _editing : null,
       onEditingComplete: kIsTv ? _onEditingComplete : null,
+      // A read-only field swallows taps without opening anything, so a pointer
+      // (a desktop in forced TV mode, a TV air mouse, a touch panel) needs
+      // the same way in as Select.
+      onTap: kIsTv ? _beginEditing : null,
     );
 
     if (!kIsTv) return field;
