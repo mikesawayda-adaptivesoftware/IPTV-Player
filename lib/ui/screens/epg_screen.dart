@@ -10,6 +10,7 @@ import '../../providers/playlist_provider.dart';
 import '../player/enhanced_video_player.dart';
 import '../widgets/loading_widget.dart';
 import '../widgets/mini_player.dart';
+import '../widgets/tv_text_field.dart';
 
 class EPGScreen extends ConsumerStatefulWidget {
   const EPGScreen({super.key});
@@ -148,7 +149,7 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
           Row(
             children: [
               Expanded(
-                child: TextField(
+                child: TvTextField(
                   controller: _searchController,
                   onChanged: (value) {
                     setState(() => _searchQuery = value);

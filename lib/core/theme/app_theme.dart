@@ -237,6 +237,13 @@ class AppTheme {
   /// so colours, shapes and every sub-theme not listed here stay in one place.
   /// Android TV guidance wants a dark UI anyway, so only density, type scale
   /// and - above all - focus visibility change.
+  static final WidgetStateProperty<BorderSide?> _tvFocusRing =
+      WidgetStateProperty.resolveWith(
+    (states) => states.contains(WidgetState.focused)
+        ? const BorderSide(color: accentColor, width: 3)
+        : null,
+  );
+
   static ThemeData get tvTheme {
     final base = darkTheme;
 
@@ -268,6 +275,32 @@ class AppTheme {
           backgroundColor: WidgetStateProperty.resolveWith(
             (states) => states.contains(WidgetState.focused) ? focus : null,
           ),
+        ),
+      ),
+
+      // Buttons draw focus as a translucent overlay of their own foreground
+      // colour, not with focusColor, so on a dialog's Cancel / Add pair the
+      // focused one was indistinguishable from the other. A solid ring is.
+      // Cancel's text is also lifted off primaryColor, which is too close to
+      // the dialog surface to read across a room.
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: base.elevatedButtonTheme.style!.copyWith(
+          side: _tvFocusRing,
+        ),
+      ),
+      textButtonTheme: TextButtonThemeData(
+        style: base.textButtonTheme.style!.copyWith(
+          foregroundColor: const WidgetStatePropertyAll(textPrimary),
+          side: _tvFocusRing,
+        ),
+      ),
+
+      // A focused field must be findable at a glance, and the default 2px
+      // primary border is the same hue as the dialog it sits on.
+      inputDecorationTheme: base.inputDecorationTheme.copyWith(
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: accentColor, width: 3),
         ),
       ),
 

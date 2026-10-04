@@ -225,6 +225,11 @@ Things that are the way they are for a reason:
   controls, which create no focus node and are invisible to a remote. Material widgets built
   on `InkWell` — `ListTile`, `IconButton`, `FilterChip` — already traverse and do not need it.
   It uses `foregroundDecoration` for the ring so focusing something cannot reflow the layout.
+- **Text fields go through `TvTextField`** (`ui/widgets/tv_text_field.dart`). A stock
+  `TextField` is a trap on a remote: `DefaultTextEditingShortcuts` binds Up/Down to caret
+  moves and reports them handled, so focus could never leave a field, and the Add Playlist
+  dialog was unusable. On TV the field is also read-only until Select, because
+  `EditableText` opens the IME on every focus gain. Off TV it is a plain `TextField`.
 - **A VOD card is one focus node.** It used to be three (outer detector, full-bleed `InkWell`,
   favourite button). Traversal prefers the smallest vertical distance, and the next row's
   heart icon sits higher than its card's centre — so D-pad *down* landed on a heart every
@@ -481,8 +486,8 @@ the README. EPG comes solely from XMLTV, never from the Xtream EPG endpoints.
 - ~80 lint infos, mostly deprecated `withOpacity` and missing `const`. `flutter analyze`
   reports **no errors**; the single warning is a pre-existing unused `_selectedChannelId`
   field in `epg_screen.dart`. Don't add new errors or warnings.
-- `test/` covers the recovery ladder and URL fallback only. There are no widget tests —
-  the stock `widget_test.dart` template was removed rather than left broken.
+- `test/` covers the recovery ladder, URL fallback and quality grouping. The only widget
+  test is `tv_text_field_test.dart`; the stock `widget_test.dart` template was removed.
 - Android release builds are signed with **debug keys** and `applicationId` is still
   `com.example.iptv_player`. Both are marked TODO in `android/app/build.gradle.kts`.
 - Android ships `usesCleartextTraffic="true"` plus a permissive network security config —
