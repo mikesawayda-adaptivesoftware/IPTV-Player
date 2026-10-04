@@ -273,6 +273,13 @@ Things that are the way they are for a reason:
   down pops the route, the up then lands on the channel list unclaimed, reaches the activity
   and pops again - out of the app. It goes through `maybePop` so the expanded mini player's
   `PopScope` still minimises.
+- **Every live-player shortcut is also in an Options sheet** (`_showOptionsMenu`), opened
+  by the remote's Menu key (`contextMenu`, acted on at key-up like Back) or the Options button
+  on the bottom bar. On TV it is the only route to quality, stats and reconnect: Up/Down are
+  channel keys, so the top bar is unreachable, and quality/reconnect have no buttons. It is a
+  sheet, i.e. its own route, precisely so the player's key interceptor is not an ancestor and
+  Up/Down move through the list. A new shortcut belongs in its `_PlayerAction` list too.
+  `Info` toggles stats directly.
 - **Video output is not one-size-fits-all on Android** (`core/player/video_output.dart`).
   The media_kit default (`vo=gpu`, `hwdec=auto-safe`) played sound over a black screen on a
   real TV box: when mpv cannot bring its output up it deselects video and carries on with

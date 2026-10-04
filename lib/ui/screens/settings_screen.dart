@@ -403,7 +403,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         const SizedBox(height: 4),
                         Text(
                           context.isTv
-                              ? 'OK = Show controls / Play/Pause • ↑↓ or CH+/CH- = Change channel • ←→ = Move between controls • Back = Channel list'
+                              ? 'OK = Show controls / Play/Pause • ↑↓ or CH+/CH- = Change channel • ←→ = Move between controls • Menu or the Options button = Mute, quality, stats, reconnect • Info = Stream stats • Back = Channel list'
                               : 'R = Manual reconnect • Q = Stream quality • I = Stream stats • Space = Play/Pause • ↑↓ = Change channel • M = Mute • F = Fullscreen',
                           style: TextStyle(fontSize: 11, color: AppTheme.textMuted),
                         ),

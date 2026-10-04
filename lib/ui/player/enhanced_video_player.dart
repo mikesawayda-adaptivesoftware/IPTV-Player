@@ -712,6 +712,19 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
       return KeyEventResult.handled;
     }
 
+    // The remote's Menu key opens the options menu, at key-up for the same
+    // reason as Back: the menu is a route, so the up would otherwise land in
+    // it unclaimed and reach the activity on its own.
+    if (event.logicalKey == LogicalKeyboardKey.contextMenu) {
+      if (event is KeyDownEvent) {
+        _menuPressed = true;
+      } else if (_menuPressed) {
+        _menuPressed = false;
+        _showOptionsMenu();
+      }
+      return KeyEventResult.handled;
+    }
+
     if (event is! KeyDownEvent) {
       if (_swallowSelectUp && event.logicalKey == LogicalKeyboardKey.select) {
         _swallowSelectUp = false;
@@ -773,6 +786,7 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
       case LogicalKeyboardKey.keyF:
         _toggleFullscreen();
       case LogicalKeyboardKey.keyI:
+      case LogicalKeyboardKey.info:
         _toggleStats();
       case LogicalKeyboardKey.keyQ:
         _showQualityPicker();
@@ -795,6 +809,9 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
 
   /// Set on Back's key-down, so its key-up is the one that acts.
   bool _backPressed = false;
+
+  /// Set on Menu's key-down, so its key-up is the one that acts.
+  bool _menuPressed = false;
 
   /// Back from the remote: closes the stats overlay if it is up, otherwise
   /// leaves the player.
@@ -843,6 +860,7 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
         LogicalKeyboardKey.keyM,
         if (!kIsTv) LogicalKeyboardKey.keyF,
         LogicalKeyboardKey.keyI,
+        LogicalKeyboardKey.info,
         LogicalKeyboardKey.keyQ,
         LogicalKeyboardKey.keyR,
         LogicalKeyboardKey.escape,
@@ -1435,6 +1453,9 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
                   for (final option in options)
                     ListTile(
                       dense: true,
+                      // A remote needs somewhere to start from, and the
+                      // current option is where the user is.
+                      autofocus: kIsTv && option == current,
                       leading: Icon(
                         _qualityIcon(option),
                         size: 20,
@@ -1467,6 +1488,181 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
 
     if (chosen != null && chosen != current) {
       await _quality.selectManual(chosen);
+    }
+  }
+
+  // ==========================================================================
+  // Options menu
+  // ==========================================================================
+
+  /// Every keyboard shortcut as a list a remote can drive: the Menu key, or
+  /// the Options button on the bottom bar.
+  ///
+  /// On TV this is the only way to most of these. Up/Down are channel keys,
+  /// so the top bar is out of reach of the D-pad, and there is no button at
+  /// all for quality (until it degrades) or reconnect. A sheet rather than
+  /// more buttons on the overlay: it is a route of its own, so the player's
+  /// key interceptor is not in its ancestor chain and Up/Down move through
+  /// the list instead of changing channel.
+  Future<void> _showOptionsMenu() async {
+    final player = _player;
+    if (player == null) return;
+    _showControlsTemporarily();
+
+    final playing = player.state.playing;
+    final muted = player.state.volume == 0;
+    final quality = _quality.current;
+    final canPickQuality = _quality.options.length >= 2;
+
+    Widget item(
+      BuildContext sheetContext,
+      _PlayerAction action,
+      IconData icon,
+      String title, {
+      String? subtitle,
+      String? shortcut,
+      bool autofocus = false,
+    }) {
+      return ListTile(
+        dense: true,
+        autofocus: autofocus,
+        leading: Icon(icon, size: 20, color: AppTheme.textSecondary),
+        title: Text(title),
+        subtitle: subtitle == null
+            ? null
+            : Text(subtitle, style: const TextStyle(fontSize: 11)),
+        // The keyboard equivalent, for desktop. Meaningless on a remote.
+        trailing: shortcut == null || kIsTv
+            ? null
+            : Text(
+                shortcut,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: AppTheme.textMuted,
+                ),
+              ),
+        onTap: () => Navigator.of(sheetContext).pop(action),
+      );
+    }
+
+    final action = await showModalBottomSheet<_PlayerAction>(
+      context: context,
+      backgroundColor: AppTheme.surfaceColor,
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+              child: Row(
+                children: [
+                  Icon(Icons.tune, size: 18, color: AppTheme.textSecondary),
+                  SizedBox(width: 8),
+                  Text(
+                    'Options',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  item(
+                    sheetContext,
+                    _PlayerAction.playPause,
+                    playing ? Icons.pause : Icons.play_arrow,
+                    playing ? 'Pause' : 'Play',
+                    shortcut: 'Space',
+                    autofocus: kIsTv,
+                  ),
+                  item(
+                    sheetContext,
+                    _PlayerAction.mute,
+                    muted ? Icons.volume_up : Icons.volume_off,
+                    muted ? 'Unmute' : 'Mute',
+                    shortcut: 'M',
+                  ),
+                  item(
+                    sheetContext,
+                    _PlayerAction.quality,
+                    Icons.high_quality_outlined,
+                    'Stream quality',
+                    subtitle: canPickQuality
+                        ? quality?.label
+                        : 'Only one quality for this channel',
+                    shortcut: 'Q',
+                  ),
+                  item(
+                    sheetContext,
+                    _PlayerAction.stats,
+                    Icons.analytics_outlined,
+                    _showStats ? 'Hide stream stats' : 'Show stream stats',
+                    shortcut: 'I',
+                  ),
+                  item(
+                    sheetContext,
+                    _PlayerAction.reconnect,
+                    Icons.refresh,
+                    'Reconnect',
+                    subtitle: _quality.isDegraded
+                        ? 'Back to full quality and the original stream'
+                        : 'Re-open the stream from scratch',
+                    shortcut: 'R',
+                  ),
+                  if (widget.onMinimize != null)
+                    item(
+                      sheetContext,
+                      _PlayerAction.minimize,
+                      Icons.picture_in_picture_alt,
+                      'Mini player',
+                    ),
+                  if (!kIsTv)
+                    item(
+                      sheetContext,
+                      _PlayerAction.fullscreen,
+                      _isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                      _isFullscreen ? 'Exit fullscreen' : 'Fullscreen',
+                      shortcut: 'F',
+                    ),
+                  item(
+                    sheetContext,
+                    _PlayerAction.close,
+                    kIsTv ? Icons.format_list_bulleted : Icons.close,
+                    kIsTv ? 'Channel list' : 'Close player',
+                    shortcut: 'Esc',
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+
+    // Acted on after the sheet has gone, so the quality picker opens on its
+    // own rather than stacked over this one.
+    if (action == null || !mounted) return;
+    switch (action) {
+      case _PlayerAction.playPause:
+        _player?.playOrPause();
+      case _PlayerAction.mute:
+        _toggleMute();
+      case _PlayerAction.quality:
+        await _showQualityPicker();
+      case _PlayerAction.stats:
+        _toggleStats();
+      case _PlayerAction.reconnect:
+        await _manualReconnect();
+      case _PlayerAction.minimize:
+        widget.onMinimize?.call();
+      case _PlayerAction.fullscreen:
+        _toggleFullscreen();
+      case _PlayerAction.close:
+        _exitPlayer();
     }
   }
 
@@ -1951,7 +2147,8 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
             child: kIsTv || context.isDesktop
                 ? Text(
                     kIsTv
-                        ? 'OK: Play/Pause • ↑↓: Channel • Back: Channel list'
+                        ? 'OK: Play/Pause • ↑↓: Channel • Menu: Options • '
+                            'Back: Channel list'
                         : 'Space: Play/Pause • ↑↓: Channel • M: Mute • Q: Quality • '
                             'I: Stats • R: Reconnect • F: Fullscreen',
                     textAlign: TextAlign.center,
@@ -1964,6 +2161,24 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
                   )
                 : const SizedBox.shrink(),
           ),
+          // Everything the keyboard shortcuts do, for a remote or a
+          // touchscreen. On the row Left/Right already moves along, like
+          // Channels below.
+          if (kIsTv)
+            TextButton.icon(
+              onPressed: player == null ? null : _showOptionsMenu,
+              icon: const Icon(Icons.tune, color: Colors.white),
+              label: const Text(
+                'Options',
+                style: TextStyle(color: Colors.white),
+              ),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.tune, color: Colors.white),
+              tooltip: 'Options',
+              onPressed: player == null ? null : _showOptionsMenu,
+            ),
           // On TV the fullscreen toggle did nothing (the app is always
           // full-screen there), and Up/Down are channel keys, so the top bar's
           // back arrow was out of reach of the remote. This slot is on the
@@ -1989,6 +2204,18 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
       ),
     );
   }
+}
+
+/// What the options menu returns, acted on once the sheet has closed.
+enum _PlayerAction {
+  playPause,
+  mute,
+  quality,
+  stats,
+  reconnect,
+  minimize,
+  fullscreen,
+  close,
 }
 
 /// One sample of what libmpv reports about the stream actually playing.
