@@ -254,6 +254,14 @@ Things that are the way they are for a reason:
   over virtualised content dead-ends past the `ListView` cache extent, and the grid is
   1 + N unsynchronised scrollers rather than a real grid. The channel pane raises
   `cacheExtent` because an unmounted focused node teleports focus to the top of the scope.
+- **The VOD seek bar is not a Material `Slider`** (`ui/player/seek_bar.dart`). `Slider` binds
+  all four arrows in traditional navigation mode, so Up/Down could never leave it - the
+  `TvTextField` trap again. `SeekBar` claims Left/Right only. `VideoPlayerControls` parks focus
+  on it whenever the overlay hides, so a hidden-controls Left/Right seeks on the first press;
+  held keys accumulate one pending target (10s, then 30s, then 60s steps) and commit a single
+  seek 600ms after the last press, rather than one seek per key repeat against a network
+  stream. The controls also seed from `player.state` - the streams do not replay, and building
+  them after the file loaded used to leave the duration at zero and the seek bar missing.
 - **Hidden on TV:** multi-view and its FAB (four players will not run on a box, and the FAB
   floats focusable over the video), "Add M3U File" (`ACTION_GET_CONTENT` has no resolver on
   most TVs), and the fullscreen toggle.

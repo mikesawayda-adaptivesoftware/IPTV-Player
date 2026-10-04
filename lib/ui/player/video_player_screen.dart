@@ -36,7 +36,6 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
   late final Player _player;
   late final VideoController _controller;
   bool _isFullscreen = false;
-  bool _showControls = true;
   bool _isLoading = true;
   String? _errorMessage;
 
@@ -206,12 +205,6 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
     }
   }
 
-  void _toggleControls() {
-    setState(() {
-      _showControls = !_showControls;
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
     // Use web video player for web platform
@@ -227,14 +220,9 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
-        // Plain GestureDetector on purpose: a whole-screen focusable node
-        // would swallow directional traversal, the same trap the live player's
-        // Focus interceptor exists to avoid. VOD is not reachable on TV today
-        // (no Channel identity, so no quality siblings), so there is no remote
-        // equivalent to add here.
-        child: GestureDetector(
-          onTap: _toggleControls,
-          child: Stack(
+        // Tap-to-reveal and every key binding live in VideoPlayerControls,
+        // which stays mounted while hidden so a remote's focus survives.
+        child: Stack(
             fit: StackFit.expand,
             children: [
               // Video Player
@@ -299,7 +287,7 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
                 ),
 
               // Custom controls overlay
-              if (_showControls && _errorMessage == null)
+              if (_errorMessage == null)
                 VideoPlayerControls(
                   player: _player,
                   title: widget.title,
@@ -311,7 +299,6 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
                 ),
             ],
           ),
-        ),
       ),
     );
   }
