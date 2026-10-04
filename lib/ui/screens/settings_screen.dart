@@ -11,6 +11,7 @@ import '../../core/platform/tv_platform.dart';
 import '../../providers/playlist_provider.dart';
 import '../../providers/tv_provider.dart';
 import '../player/enhanced_video_player.dart';
+import '../widgets/tv_text_field.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -402,56 +403,67 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(isUrl ? 'Add M3U URL' : 'Add M3U Playlist'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(
-                labelText: 'Playlist Name',
-                hintText: 'My IPTV',
+      builder: (context) {
+        void submit() {
+          if (nameController.text.isNotEmpty && urlController.text.isNotEmpty) {
+            ref.read(playlistSourcesProvider.notifier).addM3UPlaylist(
+              nameController.text,
+              urlController.text,
+              epgUrl: epgController.text.isEmpty ? null : epgController.text,
+            );
+            Navigator.pop(context);
+          }
+        }
+
+        return AlertDialog(
+          title: Text(isUrl ? 'Add M3U URL' : 'Add M3U Playlist'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TvTextField(
+                controller: nameController,
+                autofocus: context.isTv,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  labelText: 'Playlist Name',
+                  hintText: 'My IPTV',
+                ),
               ),
+              const SizedBox(height: 16),
+              TvTextField(
+                controller: urlController,
+                keyboardType: TextInputType.url,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  labelText: 'M3U URL',
+                  hintText: 'http://example.com/playlist.m3u',
+                ),
+              ),
+              const SizedBox(height: 16),
+              TvTextField(
+                controller: epgController,
+                keyboardType: TextInputType.url,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => submit(),
+                decoration: const InputDecoration(
+                  labelText: 'EPG URL (Optional)',
+                  hintText: 'http://example.com/epg.xml',
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
             ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: urlController,
-              decoration: const InputDecoration(
-                labelText: 'M3U URL',
-                hintText: 'http://example.com/playlist.m3u',
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: epgController,
-              decoration: const InputDecoration(
-                labelText: 'EPG URL (Optional)',
-                hintText: 'http://example.com/epg.xml',
-              ),
+            ElevatedButton(
+              onPressed: submit,
+              child: const Text('Add'),
             ),
           ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              if (nameController.text.isNotEmpty && urlController.text.isNotEmpty) {
-                ref.read(playlistSourcesProvider.notifier).addM3UPlaylist(
-                  nameController.text,
-                  urlController.text,
-                  epgUrl: epgController.text.isEmpty ? null : epgController.text,
-                );
-                Navigator.pop(context);
-              }
-            },
-            child: const Text('Add'),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -463,67 +475,78 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Add Xtream Playlist'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(
-                labelText: 'Playlist Name',
-                hintText: 'My Provider',
+      builder: (context) {
+        void submit() {
+          if (nameController.text.isNotEmpty &&
+              serverController.text.isNotEmpty &&
+              usernameController.text.isNotEmpty &&
+              passwordController.text.isNotEmpty) {
+            ref.read(playlistSourcesProvider.notifier).addXtreamPlaylist(
+              nameController.text,
+              serverController.text,
+              usernameController.text,
+              passwordController.text,
+            );
+            Navigator.pop(context);
+          }
+        }
+
+        return AlertDialog(
+          title: const Text('Add Xtream Playlist'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TvTextField(
+                controller: nameController,
+                autofocus: context.isTv,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  labelText: 'Playlist Name',
+                  hintText: 'My Provider',
+                ),
               ),
+              const SizedBox(height: 16),
+              TvTextField(
+                controller: serverController,
+                keyboardType: TextInputType.url,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  labelText: 'Server URL',
+                  hintText: 'http://server.com:port',
+                ),
+              ),
+              const SizedBox(height: 16),
+              TvTextField(
+                controller: usernameController,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  labelText: 'Username',
+                ),
+              ),
+              const SizedBox(height: 16),
+              TvTextField(
+                controller: passwordController,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => submit(),
+                decoration: const InputDecoration(
+                  labelText: 'Password',
+                ),
+                obscureText: true,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
             ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: serverController,
-              decoration: const InputDecoration(
-                labelText: 'Server URL',
-                hintText: 'http://server.com:port',
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: usernameController,
-              decoration: const InputDecoration(
-                labelText: 'Username',
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: passwordController,
-              decoration: const InputDecoration(
-                labelText: 'Password',
-              ),
-              obscureText: true,
+            ElevatedButton(
+              onPressed: submit,
+              child: const Text('Add'),
             ),
           ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              if (nameController.text.isNotEmpty &&
-                  serverController.text.isNotEmpty &&
-                  usernameController.text.isNotEmpty &&
-                  passwordController.text.isNotEmpty) {
-                ref.read(playlistSourcesProvider.notifier).addXtreamPlaylist(
-                  nameController.text,
-                  serverController.text,
-                  usernameController.text,
-                  passwordController.text,
-                );
-                Navigator.pop(context);
-              }
-            },
-            child: const Text('Add'),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/theme/app_theme.dart';
+import 'tv_text_field.dart';
 
 class SearchBarWidget extends StatefulWidget {
   final String hintText;
@@ -47,7 +48,7 @@ class _SearchBarWidgetState extends State<SearchBarWidget> {
 
   @override
   Widget build(BuildContext context) {
-    return TextField(
+    return TvTextField(
       controller: _controller,
       onChanged: widget.onChanged,
       decoration: InputDecoration(
