@@ -9,6 +9,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../../core/player/quality_controller.dart';
 import '../../core/player/stream_quality.dart';
 import '../../core/player/stream_tuning.dart';
+import '../../core/player/video_output.dart';
 import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/channel.dart';
@@ -128,7 +129,10 @@ class _MultiViewScreenState extends ConsumerState<MultiViewScreen> {
     // Publish before tuning - setProperty waits on VideoController
     // initialisation, which needs the Video widget mounted.
     slot.player = player;
-    slot.controller = VideoController(player);
+    slot.controller = VideoController(
+      player,
+      configuration: VideoOutput.effective.configuration,
+    );
     if (mounted) setState(() {});
 
     await _applySlotTuning(slotIndex, player);

@@ -266,7 +266,21 @@ Things that are the way they are for a reason:
   them after the file loaded used to leave the duration at zero and the seek bar missing.
 - **Hidden on TV:** multi-view and its FAB (four players will not run on a box, and the FAB
   floats focusable over the video), "Add M3U File" (`ACTION_GET_CONTENT` has no resolver on
-  most TVs), and the fullscreen toggle.
+  most TVs), and the fullscreen toggle. In the live player the fullscreen slot becomes a
+  **Channels** button, because Up/Down are channel keys and the top bar's back arrow is
+  unreachable from a remote.
+- **Back is acted on at key-up** in the live player (`_backPressed` latch). Acting on the
+  down pops the route, the up then lands on the channel list unclaimed, reaches the activity
+  and pops again - out of the app. It goes through `maybePop` so the expanded mini player's
+  `PopScope` still minimises.
+- **Video output is not one-size-fits-all on Android** (`core/player/video_output.dart`).
+  The media_kit default (`vo=gpu`, `hwdec=auto-safe`) played sound over a black screen on a
+  real TV box: when mpv cannot bring its output up it deselects video and carries on with
+  audio, no error. The live player checks 8s after each open (`_checkPicture`) and, on a
+  stream that has a video track but no configured output, rebuilds on the next output
+  (hardware -> direct `mediacodec_embed` -> software). The one that works is persisted as
+  `VideoOutput.learned`; Settings can pin one. Impeller is also disabled in the manifest,
+  because a frame lost in the compositor is black with mpv reporting nothing wrong.
 
 ### Branding
 

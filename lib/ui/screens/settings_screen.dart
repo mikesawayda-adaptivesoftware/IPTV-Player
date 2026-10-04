@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_picker/file_picker.dart';
 
+import '../../core/player/video_output.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/extensions.dart';
@@ -281,6 +282,48 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               contentPadding: EdgeInsets.zero,
             ),
             
+            // Video output - Android only, where one renderer does not suit
+            // every device.
+            if (VideoOutput.isConfigurable) ...[
+              const Divider(height: 32),
+              const Text(
+                'Video Output',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'If channels play sound with a black picture, try another '
+                'output here. Applies from the next channel you open.',
+                style: TextStyle(fontSize: 12, color: AppTheme.textMuted),
+              ),
+              const SizedBox(height: 12),
+              ...VideoOutput.values.map((output) => RadioListTile<VideoOutput>(
+                    title: Text(output.label),
+                    subtitle: Text(
+                      output == VideoOutput.auto
+                          ? '${output.description}. Currently: '
+                              '${VideoOutput.learned.label}'
+                          : output.description,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    value: output,
+                    groupValue: VideoOutput.preference,
+                    onChanged: (value) {
+                      if (value == null) return;
+                      // A latched global like kIsTv, read when each player is
+                      // built, so there is no provider to notify.
+                      setState(() => VideoOutput.preference = value);
+                      storage.saveSetting(
+                        AppConstants.settingVideoOutput,
+                        value.index,
+                      );
+                    },
+                    activeColor: AppTheme.primaryColor,
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                  )),
+            ],
+
             const Divider(height: 32),
 
             // Device layout
@@ -360,7 +403,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         const SizedBox(height: 4),
                         Text(
                           context.isTv
-                              ? 'OK = Show controls / Play/Pause • ↑↓ or CH+/CH- = Change channel • ←→ = Move between controls • Back = Minimise'
+                              ? 'OK = Show controls / Play/Pause • ↑↓ or CH+/CH- = Change channel • ←→ = Move between controls • Back = Channel list'
                               : 'R = Manual reconnect • Q = Stream quality • I = Stream stats • Space = Play/Pause • ↑↓ = Change channel • M = Mute • F = Fullscreen',
                           style: TextStyle(fontSize: 11, color: AppTheme.textMuted),
                         ),

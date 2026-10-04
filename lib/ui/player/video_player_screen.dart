@@ -6,6 +6,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../core/player/stream_tuning.dart';
+import '../../core/player/video_output.dart';
 import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import 'enhanced_video_player.dart' show autoReconnectProvider, bufferModeProvider;
@@ -66,12 +67,10 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
     _player = Player();
     _controller = VideoController(
       _player,
-      configuration: VideoControllerConfiguration(
-        // Software rendering on Linux only; see
-        // StreamTuning.enableHardwareAcceleration. This was unconditional,
-        // which made 1080p unplayable on low-power Android devices.
-        enableHardwareAcceleration: StreamTuning.enableHardwareAcceleration,
-      ),
+      // Software rendering on Linux only (see
+      // StreamTuning.enableHardwareAcceleration); on Android, whichever output
+      // the live player last saw a picture from.
+      configuration: VideoOutput.effective.configuration,
     );
 
     await StreamTuning.apply(

@@ -11,6 +11,7 @@ import '../../core/constants/app_constants.dart';
 import '../../core/player/quality_controller.dart';
 import '../../core/player/stream_quality.dart';
 import '../../core/player/stream_tuning.dart';
+import '../../core/player/video_output.dart';
 import '../../core/platform/tv_platform.dart';
 import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
@@ -126,6 +127,19 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
 
   final FocusNode _focusNode = FocusNode();
 
+  /// The output the current player was built with. Starts from what this
+  /// device last showed a picture on, and is stepped by [_checkPicture] when a
+  /// stream plays sound with no video.
+  VideoOutput _output = VideoOutput.effective;
+
+  /// Fires once per open, a few seconds in, to confirm a picture appeared.
+  Timer? _pictureTimer;
+
+  /// Set when every output failed on one stream. That stream's video is
+  /// probably the problem, not the output, so the next channel goes back to
+  /// the output that last worked rather than staying on the last resort.
+  bool _rebuildOnNextChannel = false;
+
   @override
   void initState() {
     super.initState();
@@ -238,12 +252,9 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
 
       final controller = VideoController(
         player,
-        configuration: VideoControllerConfiguration(
-          // Software rendering on Linux only, where GPU textures crash on some
-          // drivers. Everywhere else - and on a TV box especially - software
-          // decoding cannot sustain 1080p.
-          enableHardwareAcceleration: StreamTuning.enableHardwareAcceleration,
-        ),
+        // Software rendering on Linux only, where GPU textures crash on some
+        // drivers. On Android, one of several outputs - see VideoOutput.
+        configuration: _output.configuration,
       );
 
       // Publish to the widget tree FIRST. The VideoController only finishes
@@ -392,11 +403,91 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
       // alternate container, so the watchdog reads the right URL.
       _streamUrl = url;
       _watchdog.noteStreamOpened(userInitiated: userInitiated);
+      _schedulePictureCheck();
     } catch (e) {
       // Exception text from mpv/Dio routinely embeds the full stream URL.
       print('Error opening stream: ${StreamTuning.redactUrl(e.toString())}');
       _handlePlaybackError(e.toString());
     }
+  }
+
+  // ==========================================================================
+  // Picture check
+  // ==========================================================================
+
+  /// How long after an open a picture must have appeared. Generous, because a
+  /// false positive costs a player rebuild on a stream that was about to work.
+  static const _pictureGrace = Duration(seconds: 8);
+
+  void _schedulePictureCheck() {
+    _pictureTimer?.cancel();
+    if (!VideoOutput.isConfigurable) return;
+    final player = _player;
+    _pictureTimer = Timer(_pictureGrace, () => _checkPicture(player));
+  }
+
+  /// Catches "sound but no picture", which the watchdog cannot: the playhead
+  /// moves, so as far as it is concerned the stream is healthy.
+  ///
+  /// When mpv cannot bring its video output up it deselects the video track
+  /// and keeps playing audio, with no error event. So the signal is a stream
+  /// that has a video track while mpv has no configured video output. The fix
+  /// is a different output, and outputs are fixed when the VideoController is
+  /// built, so this rebuilds the player on the next one in line.
+  Future<void> _checkPicture(Player? player) async {
+    if (!mounted || player == null || !identical(player, _player)) return;
+    // Audio-only is the user's choice, and a stalled stream is the
+    // watchdog's - neither says anything about the output.
+    if (_quality.current?.videoDisabled ?? false) return;
+    if (!_watchdogStatus.isHealthy || !player.state.playing) return;
+
+    // Radio channels and audio-only feeds carry no video track at all.
+    final hasVideo = player.state.tracks.video
+        .any((track) => track.id != 'auto' && track.id != 'no');
+    if (!hasVideo) return;
+
+    final reads = await Future.wait([
+      StreamTuning.readProperty(player, 'vid'),
+      StreamTuning.readProperty(player, 'current-vo'),
+      StreamTuning.readProperty(player, 'video-params/w'),
+    ]);
+    if (!mounted || !identical(player, _player)) return;
+
+    final vid = reads[0];
+    final vo = reads[1];
+    final width = reads[2];
+    // vo=null is media_kit's placeholder until the Flutter surface exists; if
+    // it is still there now, the surface never arrived.
+    final noPicture = vid == 'no' || vo == null || vo == 'null' || width == null;
+
+    if (!noPicture) {
+      if (VideoOutput.preference == VideoOutput.auto &&
+          VideoOutput.learned != _output) {
+        print('Picture confirmed on ${_output.name} output; remembering it');
+        VideoOutput.learned = _output;
+        StorageService().saveSetting(
+          AppConstants.settingVideoOutputLearned,
+          _output.index,
+        );
+      }
+      return;
+    }
+
+    print('No picture on ${_output.name} output (vid=$vid vo=$vo w=$width)');
+
+    // A pinned output is the user's call; say nothing and leave it.
+    if (VideoOutput.preference != VideoOutput.auto) return;
+
+    final next = _output.fallback;
+    if (next == null) {
+      print('No output shows a picture for this stream');
+      _rebuildOnNextChannel = _output != VideoOutput.effective;
+      return;
+    }
+
+    print('Rebuilding player on ${next.name} output');
+    _output = next;
+    await _recreatePlayer(_streamUrl);
   }
 
   void _handlePlaybackError(String rawError) {
@@ -462,6 +553,7 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     _hideTimer?.cancel();
     _bannerTimer?.cancel();
     _statsTimer?.cancel();
+    _pictureTimer?.cancel();
     _quality.dispose();
     _watchdog.dispose();
     _cancelSubscriptions();
@@ -540,6 +632,12 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     _refreshQualityOptions();
     _resetStatsWindow();
     _qualitySamples.clear();
+    if (_rebuildOnNextChannel) {
+      _rebuildOnNextChannel = false;
+      _output = VideoOutput.effective;
+      await _recreatePlayer(newChannel.streamUrl);
+      return;
+    }
     await _openUrl(newChannel.streamUrl);
   }
 
@@ -598,6 +696,22 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     // the matching key-up is redispatched to the Android activity - and Back
     // fires on ACTION_UP, so the activity would pop out from under us.
     if (event is KeyRepeatEvent) return KeyEventResult.handled;
+
+    // The remote's Back. Acted on at key-up, not key-down: acting on the down
+    // pops this route, so the up lands on the channel list where nothing
+    // claims it, reaches the activity - which fires Back on ACTION_UP - and
+    // pops again, straight out of the app. Latched so an up whose down
+    // happened somewhere else is swallowed rather than acted on.
+    if (event.logicalKey == LogicalKeyboardKey.goBack) {
+      if (event is KeyDownEvent) {
+        _backPressed = true;
+      } else if (_backPressed) {
+        _backPressed = false;
+        _goBack();
+      }
+      return KeyEventResult.handled;
+    }
+
     if (event is! KeyDownEvent) {
       if (_swallowSelectUp && event.logicalKey == LogicalKeyboardKey.select) {
         _swallowSelectUp = false;
@@ -668,7 +782,7 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
         if (_isFullscreen) {
           _toggleFullscreen();
         } else {
-          widget.onClose?.call();
+          _exitPlayer();
         }
     }
 
@@ -678,6 +792,32 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
   /// Set when a Select press was spent waking the controls, so its key-up is
   /// consumed too rather than leaking to the platform unmatched.
   bool _swallowSelectUp = false;
+
+  /// Set on Back's key-down, so its key-up is the one that acts.
+  bool _backPressed = false;
+
+  /// Back from the remote: closes the stats overlay if it is up, otherwise
+  /// leaves the player.
+  ///
+  /// maybePop rather than [_exitPlayer], so the expanded mini player's
+  /// PopScope still turns Back into minimise instead of stopping playback.
+  void _goBack() {
+    if (_showStats) {
+      _toggleStats();
+      return;
+    }
+    Navigator.of(context).maybePop();
+  }
+
+  /// The back arrow, the TV's Channels button and Esc.
+  void _exitPlayer() {
+    final onClose = widget.onClose;
+    if (onClose != null) {
+      onClose();
+    } else {
+      Navigator.of(context).maybePop();
+    }
+  }
 
   /// Keys handled by [_handleKeyEvent], as a set so key-up can be consumed
   /// symmetrically without duplicating the switch.
@@ -1109,7 +1249,12 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
       StreamTuning.readDouble(player, 'demuxer-cache-time'),
       StreamTuning.readDouble(player, 'container-fps'),
     ]);
-    final codec = await StreamTuning.readProperty(player, 'video-format');
+    final strings = await Future.wait([
+      StreamTuning.readProperty(player, 'video-format'),
+      StreamTuning.readProperty(player, 'current-vo'),
+      StreamTuning.readProperty(player, 'hwdec-current'),
+    ]);
+    final codec = strings[0];
 
     if (!mounted) return;
 
@@ -1130,6 +1275,9 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
       cacheTime: numbers[5],
       fps: numbers[6],
       codec: codec,
+      // What mpv is actually rendering with, which is not necessarily what
+      // was asked for: hwdec falls back to software silently.
+      output: '${strings[1] ?? 'none'} / ${strings[2] ?? 'no'} hwdec',
       samples: _bitrateWindow.length,
     );
 
@@ -1390,6 +1538,8 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
             _statLine('audio bitrate', _StreamStats.mbps(stats?.audioBitrate)),
             _statLine('codec / fps',
                 '${stats?.codec ?? '-'}  ${stats?.fps?.toStringAsFixed(0) ?? '-'}fps'),
+            if (VideoOutput.isConfigurable)
+              _statLine('output', stats?.output ?? '-'),
             const Divider(height: 12, color: Colors.white12),
 
             _statLine('arriving', _StreamStats.mbpsFromBytes(stats?.cacheSpeed)),
@@ -1640,7 +1790,7 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
           children: [
             IconButton(
               icon: const Icon(Icons.arrow_back, color: Colors.white),
-              onPressed: widget.onClose ?? () => Navigator.of(context).pop(),
+              onPressed: _exitPlayer,
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -1801,7 +1951,7 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
             child: kIsTv || context.isDesktop
                 ? Text(
                     kIsTv
-                        ? 'OK: Play/Pause • ↑↓: Channel • Back: Minimise'
+                        ? 'OK: Play/Pause • ↑↓: Channel • Back: Channel list'
                         : 'Space: Play/Pause • ↑↓: Channel • M: Mute • Q: Quality • '
                             'I: Stats • R: Reconnect • F: Fullscreen',
                     textAlign: TextAlign.center,
@@ -1814,13 +1964,27 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
                   )
                 : const SizedBox.shrink(),
           ),
-          IconButton(
-            icon: Icon(
-              _isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-              color: Colors.white,
+          // On TV the fullscreen toggle did nothing (the app is always
+          // full-screen there), and Up/Down are channel keys, so the top bar's
+          // back arrow was out of reach of the remote. This slot is on the
+          // row Left/Right already moves along.
+          if (kIsTv)
+            TextButton.icon(
+              onPressed: _exitPlayer,
+              icon: const Icon(Icons.format_list_bulleted, color: Colors.white),
+              label: const Text(
+                'Channels',
+                style: TextStyle(color: Colors.white),
+              ),
+            )
+          else
+            IconButton(
+              icon: Icon(
+                _isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                color: Colors.white,
+              ),
+              onPressed: _toggleFullscreen,
             ),
-            onPressed: _toggleFullscreen,
-          ),
         ],
       ),
     );
@@ -1845,6 +2009,9 @@ class _StreamStats {
   final double? fps;
   final String? codec;
 
+  /// mpv's video output and the hardware decoder in use, as `vo / hwdec`.
+  final String? output;
+
   /// How many bitrate readings the mean is over, so a number that has not
   /// settled yet can be shown as provisional.
   final int samples;
@@ -1858,6 +2025,7 @@ class _StreamStats {
     this.cacheTime,
     this.fps,
     this.codec,
+    this.output,
     this.samples = 0,
   });
 
