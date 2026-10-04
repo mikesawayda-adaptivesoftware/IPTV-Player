@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../core/theme/app_theme.dart';
@@ -23,6 +25,12 @@ class _SearchBarWidgetState extends State<SearchBarWidget> {
   final _controller = TextEditingController();
   bool _hasText = false;
 
+  /// Coalesces keystrokes. Each search filters the whole playlist - tens of
+  /// thousands of channels on a big subscription - and running that on every
+  /// key made typing visibly lag on TV boxes.
+  Timer? _debounce;
+  static const _debounceDelay = Duration(milliseconds: 250);
+
   @override
   void initState() {
     super.initState();
@@ -36,11 +44,18 @@ class _SearchBarWidgetState extends State<SearchBarWidget> {
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _controller.dispose();
     super.dispose();
   }
 
+  void _onChanged(String query) {
+    _debounce?.cancel();
+    _debounce = Timer(_debounceDelay, () => widget.onChanged(query));
+  }
+
   void _clear() {
+    _debounce?.cancel();
     _controller.clear();
     widget.onChanged('');
     widget.onClear?.call();
@@ -50,7 +65,11 @@ class _SearchBarWidgetState extends State<SearchBarWidget> {
   Widget build(BuildContext context) {
     return TvTextField(
       controller: _controller,
-      onChanged: widget.onChanged,
+      onChanged: _onChanged,
+      onSubmitted: (query) {
+        _debounce?.cancel();
+        widget.onChanged(query);
+      },
       decoration: InputDecoration(
         hintText: widget.hintText,
         prefixIcon: const Icon(Icons.search, color: AppTheme.textMuted),
@@ -58,6 +77,7 @@ class _SearchBarWidgetState extends State<SearchBarWidget> {
             ? IconButton(
                 icon: const Icon(Icons.clear, color: AppTheme.textMuted),
                 onPressed: _clear,
+                tooltip: 'Clear search',
               )
             : null,
         filled: true,

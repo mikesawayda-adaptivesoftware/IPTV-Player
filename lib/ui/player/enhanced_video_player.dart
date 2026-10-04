@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -13,6 +14,7 @@ import '../../core/player/stream_tuning.dart';
 import '../../core/platform/tv_platform.dart';
 import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/extensions.dart';
 import '../../data/models/channel.dart';
 import '../../data/services/storage_service.dart';
 import '../../providers/playlist_provider.dart';
@@ -91,6 +93,10 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
   bool _isBuffering = false;
   String? _errorMessage;
   Timer? _hideTimer;
+
+  /// Drives the now/next banner shown after a channel change.
+  Timer? _bannerTimer;
+  bool _showChannelBanner = false;
 
   double _bufferHealth = 0.0;
 
@@ -454,6 +460,7 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     WidgetsBinding.instance.removeObserver(this);
     TvPlatform.releaseKeepScreenOn();
     _hideTimer?.cancel();
+    _bannerTimer?.cancel();
     _statsTimer?.cancel();
     _quality.dispose();
     _watchdog.dispose();
@@ -529,10 +536,23 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     });
 
     ref.read(channelStateProvider.notifier).markAsWatched(newChannel);
+    _flashChannelBanner();
     _refreshQualityOptions();
     _resetStatsWindow();
     _qualitySamples.clear();
     await _openUrl(newChannel.streamUrl);
+  }
+
+  /// Shows which channel was just tuned, and what is on it, for a few
+  /// seconds. A banner rather than revealing the controls: those would make
+  /// the next OK press pause instead of waking them, which is not what someone
+  /// flicking through channels expects.
+  void _flashChannelBanner() {
+    _bannerTimer?.cancel();
+    setState(() => _showChannelBanner = true);
+    _bannerTimer = Timer(const Duration(seconds: 4), () {
+      if (mounted) setState(() => _showChannelBanner = false);
+    });
   }
 
   void _nextChannel() {
@@ -785,12 +805,136 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
               if (_quality.isDegraded && _errorMessage == null)
                 _buildQualityBadge(),
 
+              // Hidden under the controls, which already name the channel.
+              if (widget.isLive && _errorMessage == null)
+                _buildChannelBanner(),
+
               if (_showStats) _buildStatsOverlay(),
             ],
           ),
         ),
       ),
     );
+  }
+
+  Widget _buildChannelBanner() {
+    final channel = _currentChannel;
+    final epg = ref.read(epgStateProvider.notifier);
+    final epgId = channel.epgChannelId;
+    final hasEpg = epgId != null && epgId.isNotEmpty;
+    final now = hasEpg ? epg.getCurrentProgram(epgId) : null;
+    final next = hasEpg ? epg.getNextProgram(epgId) : null;
+    final logo = channel.logoUrl;
+
+    return Positioned(
+      left: 24 + _overlayInset,
+      right: 24 + _overlayInset,
+      bottom: 24 + _overlayInset,
+      child: IgnorePointer(
+        child: AnimatedOpacity(
+          opacity: _showChannelBanner && !_showControls ? 1.0 : 0.0,
+          duration: const Duration(milliseconds: 250),
+          child: Center(
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 640),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.75),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: Colors.white12),
+              ),
+              child: Row(
+                children: [
+                  if (logo != null && logo.isNotEmpty) ...[
+                    SizedBox(
+                      width: 56,
+                      height: 56,
+                      child: CachedNetworkImage(
+                        imageUrl: logo,
+                        fit: BoxFit.contain,
+                        errorWidget: (_, __, ___) => const Icon(
+                          Icons.live_tv,
+                          color: Colors.white54,
+                          size: 32,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                  ],
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          channel.name,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        if (now != null)
+                          _bannerProgram('Now', now.title,
+                              '${_hhmm(now.startTime)} - ${_hhmm(now.endTime)}'),
+                        if (next != null)
+                          _bannerProgram(
+                              'Next', next.title, _hhmm(next.startTime)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _bannerProgram(String label, String title, String time) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 40,
+            child: Text(
+              label.toUpperCase(),
+              style: const TextStyle(
+                color: AppTheme.accentColor,
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            time,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.6),
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _hhmm(DateTime t) {
+    final local = t.toLocal();
+    return '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}';
   }
 
   Widget _buildLoadingOverlay() {
@@ -805,9 +949,15 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
           children: [
             const CircularProgressIndicator(color: AppTheme.primaryColor),
             const SizedBox(height: 16),
-            Text(
-              recovering ? _watchdogStatus.message : 'Buffering...',
-              style: const TextStyle(color: Colors.white),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Text(
+                recovering
+                    ? _watchdogStatus.message
+                    : 'Tuning to ${_currentChannel.name}...',
+                style: const TextStyle(color: Colors.white),
+                textAlign: TextAlign.center,
+              ),
             ),
             const SizedBox(height: 8),
             Text(
@@ -1645,18 +1795,25 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
             ),
             onPressed: player == null ? null : _toggleMute,
           ),
-          const Spacer(),
-          Text(
-            kIsTv
-                ? 'OK: Play/Pause • ↑↓: Channel • Back: Minimise'
-                : 'Space: Play/Pause • ↑↓: Channel • M: Mute • Q: Quality • '
-                    'I: Stats • R: Reconnect • F: Fullscreen',
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.5),
-              fontSize: 11,
-            ),
+          // Keyboard hints mean nothing on a touchscreen, and the desktop
+          // string is wider than a phone - it overflowed the row there.
+          Expanded(
+            child: kIsTv || context.isDesktop
+                ? Text(
+                    kIsTv
+                        ? 'OK: Play/Pause • ↑↓: Channel • Back: Minimise'
+                        : 'Space: Play/Pause • ↑↓: Channel • M: Mute • Q: Quality • '
+                            'I: Stats • R: Reconnect • F: Fullscreen',
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.5),
+                      fontSize: 11,
+                    ),
+                  )
+                : const SizedBox.shrink(),
           ),
-          const Spacer(),
           IconButton(
             icon: Icon(
               _isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,

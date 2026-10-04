@@ -7,6 +7,7 @@ import '../models/epg_program.dart';
 import '../models/playlist_source.dart';
 import '../models/server_info.dart';
 import '../models/vod_item.dart';
+import '../../core/utils/network_errors.dart';
 
 class XtreamService {
   final Dio _dio;
@@ -57,7 +58,7 @@ class XtreamService {
       
       return _serverInfo!;
     } on DioException catch (e) {
-      throw Exception('Authentication failed: ${e.message}');
+      throw Exception("Couldn't sign in. " '${describeNetworkError(e)}');
     }
   }
 
@@ -76,7 +77,7 @@ class XtreamService {
           .map((json) => Category.fromXtream(json as Map<String, dynamic>))
           .toList();
     } on DioException catch (e) {
-      throw Exception('Failed to fetch live categories: ${e.message}');
+      throw Exception("Couldn't load channel categories. " '${describeNetworkError(e)}');
     }
   }
 
@@ -103,7 +104,7 @@ class XtreamService {
               ))
           .toList();
     } on DioException catch (e) {
-      throw Exception('Failed to fetch live streams: ${e.message}');
+      throw Exception("Couldn't load channels. " '${describeNetworkError(e)}');
     }
   }
 
@@ -122,7 +123,7 @@ class XtreamService {
           .map((json) => Category.fromXtream(json as Map<String, dynamic>))
           .toList();
     } on DioException catch (e) {
-      throw Exception('Failed to fetch VOD categories: ${e.message}');
+      throw Exception("Couldn't load movie categories. " '${describeNetworkError(e)}');
     }
   }
 
@@ -149,7 +150,7 @@ class XtreamService {
               ))
           .toList();
     } on DioException catch (e) {
-      throw Exception('Failed to fetch VOD streams: ${e.message}');
+      throw Exception("Couldn't load movies. " '${describeNetworkError(e)}');
     }
   }
 
@@ -168,7 +169,7 @@ class XtreamService {
           .map((json) => Category.fromXtream(json as Map<String, dynamic>))
           .toList();
     } on DioException catch (e) {
-      throw Exception('Failed to fetch series categories: ${e.message}');
+      throw Exception("Couldn't load series categories. " '${describeNetworkError(e)}');
     }
   }
 
@@ -188,7 +189,7 @@ class XtreamService {
       
       return response.data!.cast<Map<String, dynamic>>();
     } on DioException catch (e) {
-      throw Exception('Failed to fetch series: ${e.message}');
+      throw Exception("Couldn't load series. " '${describeNetworkError(e)}');
     }
   }
 
@@ -207,7 +208,7 @@ class XtreamService {
       
       return response.data!;
     } on DioException catch (e) {
-      throw Exception('Failed to fetch series info: ${e.message}');
+      throw Exception("Couldn't load series info. " '${describeNetworkError(e)}');
     }
   }
 
@@ -226,7 +227,7 @@ class XtreamService {
       
       return response.data!;
     } on DioException catch (e) {
-      throw Exception('Failed to fetch VOD info: ${e.message}');
+      throw Exception("Couldn't load VOD info. " '${describeNetworkError(e)}');
     }
   }
 
@@ -248,7 +249,7 @@ class XtreamService {
           .map((json) => EPGProgram.fromXtream(json as Map<String, dynamic>))
           .toList();
     } on DioException catch (e) {
-      throw Exception('Failed to fetch EPG: ${e.message}');
+      throw Exception("Couldn't load EPG. " '${describeNetworkError(e)}');
     }
   }
 
@@ -270,7 +271,7 @@ class XtreamService {
           .map((json) => EPGProgram.fromXtream(json as Map<String, dynamic>))
           .toList();
     } on DioException catch (e) {
-      throw Exception('Failed to fetch all EPG: ${e.message}');
+      throw Exception("Couldn't load all EPG. " '${describeNetworkError(e)}');
     }
   }
 

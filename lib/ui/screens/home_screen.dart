@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/extensions.dart';
+import '../../data/models/playlist_source.dart';
+import '../../providers/navigation_provider.dart';
 import '../../providers/playlist_provider.dart';
 import '../widgets/mini_player.dart';
 import 'live_tv_screen.dart';
@@ -19,8 +21,6 @@ class HomeScreen extends ConsumerStatefulWidget {
 }
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
-  int _selectedIndex = 0;
-
   final _screens = const [
     LiveTVScreen(),
     VODScreen(),
@@ -37,16 +37,31 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   void _loadInitialData() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final activePlaylist = ref.read(activePlaylistProvider);
-      if (activePlaylist != null) {
-        ref.read(channelStateProvider.notifier).loadChannels(activePlaylist);
-        ref.read(vodStateProvider.notifier).loadVOD(activePlaylist);
-        ref.read(epgStateProvider.notifier).loadEPG(activePlaylist.effectiveEpgUrl);
-      }
+      if (activePlaylist != null) _loadPlaylist(activePlaylist);
     });
+  }
+
+  void _loadPlaylist(PlaylistSource source) {
+    ref.read(channelStateProvider.notifier).loadChannels(source);
+    ref.read(vodStateProvider.notifier).loadVOD(source);
+    ref.read(epgStateProvider.notifier).loadEPG(source.effectiveEpgUrl);
   }
 
   @override
   Widget build(BuildContext context) {
+    // Reload whenever a different playlist becomes the active one: adding the
+    // first playlist, activating another, or deleting the active one. Keyed on
+    // the id so re-saving the same source does not refetch everything.
+    // Previously only initState loaded anything, so a freshly added playlist
+    // showed "No channels found" until the user found the refresh button.
+    ref.listen<String?>(activePlaylistProvider.select((p) => p?.id),
+        (previous, next) {
+      if (next == null || next == previous) return;
+      final source = ref.read(activePlaylistProvider);
+      if (source != null) _loadPlaylist(source);
+    });
+
+    final selectedIndex = ref.watch(homeTabProvider).index;
     final isDesktop = context.isDesktop;
     // While the mini player is expanded it draws over this whole Stack, but it
     // is not a route - so without excluding the shell, the rail, the channel
@@ -62,7 +77,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             child: Row(
             children: [
               // Navigation Rail for desktop
-              if (isDesktop) _buildNavigationRail(),
+              if (isDesktop) _buildNavigationRail(selectedIndex),
               
               // Main content. SafeArea keeps tab headers clear of the phone's
               // status bar and gesture insets - without it the header (and its
@@ -80,11 +95,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               Expanded(
                 child: SafeArea(
                   child: IndexedStack(
-                    index: _selectedIndex,
+                    index: selectedIndex,
                     children: [
                       for (var i = 0; i < _screens.length; i++)
                         ExcludeFocus(
-                          excluding: i != _selectedIndex,
+                          excluding: i != selectedIndex,
                           child: _screens[i],
                         ),
                     ],
@@ -100,7 +115,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ],
       ),
       // Bottom nav for mobile/tablet
-      bottomNavigationBar: isDesktop ? null : _buildBottomNavBar(),
+      bottomNavigationBar: isDesktop ? null : _buildBottomNavBar(selectedIndex),
       // Not on TV: four simultaneous media_kit players will not run on a TV
       // box, and the FAB is a focusable target floating over the video inside
       // the overscan margin.
@@ -111,18 +126,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           );
         },
         backgroundColor: AppTheme.primaryColor,
-        tooltip: 'Multi-View (Watch 4 channels)',
+        tooltip: 'Multi-View (watch 4 channels)',
         child: const Icon(Icons.grid_view),
       ),
     );
   }
 
-  Widget _buildNavigationRail() {
+  void _selectTab(int index) {
+    ref.read(homeTabProvider.notifier).state = HomeTab.values[index];
+  }
+
+  Widget _buildNavigationRail(int selectedIndex) {
     return NavigationRail(
-      selectedIndex: _selectedIndex,
-      onDestinationSelected: (index) {
-        setState(() => _selectedIndex = index);
-      },
+      selectedIndex: selectedIndex,
+      onDestinationSelected: _selectTab,
       labelType: NavigationRailLabelType.all,
       leading: Padding(
         padding: const EdgeInsets.symmetric(vertical: 16),
@@ -142,11 +159,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             const SizedBox(height: 8),
             const Text(
-              'IPTV',
+              'Definitely\nNot Cable',
+              textAlign: TextAlign.center,
               style: TextStyle(
                 color: AppTheme.textPrimary,
                 fontWeight: FontWeight.bold,
-                fontSize: 12,
+                fontSize: 11,
+                height: 1.2,
               ),
             ),
           ],
@@ -161,12 +180,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         NavigationRailDestination(
           icon: Icon(Icons.movie_outlined),
           selectedIcon: Icon(Icons.movie),
-          label: Text('VOD'),
+          label: Text('Movies'),
         ),
         NavigationRailDestination(
           icon: Icon(Icons.calendar_today_outlined),
           selectedIcon: Icon(Icons.calendar_today),
-          label: Text('EPG'),
+          label: Text('Guide'),
         ),
         NavigationRailDestination(
           icon: Icon(Icons.settings_outlined),
@@ -177,12 +196,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  Widget _buildBottomNavBar() {
+  Widget _buildBottomNavBar(int selectedIndex) {
     return BottomNavigationBar(
-      currentIndex: _selectedIndex,
-      onTap: (index) {
-        setState(() => _selectedIndex = index);
-      },
+      currentIndex: selectedIndex,
+      onTap: _selectTab,
       items: const [
         BottomNavigationBarItem(
           icon: Icon(Icons.tv_outlined),
@@ -192,12 +209,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         BottomNavigationBarItem(
           icon: Icon(Icons.movie_outlined),
           activeIcon: Icon(Icons.movie),
-          label: 'VOD',
+          label: 'Movies',
         ),
         BottomNavigationBarItem(
           icon: Icon(Icons.calendar_today_outlined),
           activeIcon: Icon(Icons.calendar_today),
-          label: 'EPG',
+          label: 'Guide',
         ),
         BottomNavigationBarItem(
           icon: Icon(Icons.settings_outlined),

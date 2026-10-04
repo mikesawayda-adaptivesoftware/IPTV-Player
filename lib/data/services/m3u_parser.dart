@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/channel.dart';
+import '../../core/utils/network_errors.dart';
 
 class M3UParser {
   final Dio _dio;
@@ -28,7 +29,7 @@ class M3UParser {
       
       return parseContent(response.data!);
     } on DioException catch (e) {
-      throw Exception('Failed to fetch M3U file: ${e.message}');
+      throw Exception("Couldn't download the playlist. " '${describeNetworkError(e)}');
     }
   }
 

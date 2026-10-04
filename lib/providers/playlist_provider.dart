@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
+import '../core/platform/tv_platform.dart';
 import '../core/player/stream_quality.dart';
 import '../data/models/category.dart';
 import '../data/models/channel.dart';
@@ -43,8 +44,7 @@ class PlaylistSourcesNotifier extends StateNotifier<List<PlaylistSource>> {
       url: url,
       epgUrl: epgUrl,
     );
-    await _storage.savePlaylistSource(source);
-    _loadSources();
+    await _add(source);
   }
 
   Future<void> addXtreamPlaylist(
@@ -60,7 +60,24 @@ class PlaylistSourcesNotifier extends StateNotifier<List<PlaylistSource>> {
       username: username,
       password: password,
     );
-    await _storage.savePlaylistSource(source);
+    await _add(source);
+  }
+
+  /// Saves a new source without changing which one is active.
+  ///
+  /// With nothing explicitly active, [activePlaylistProvider] falls back to the
+  /// first source - and Hive orders sources by their random uuid key, so adding
+  /// a second playlist could silently switch playback to it. The first source
+  /// added becomes active outright, and an implicit choice is made explicit
+  /// before anything else is added.
+  Future<void> _add(PlaylistSource source) async {
+    final hasActive = state.any((s) => s.isActive);
+    if (!hasActive && state.isNotEmpty) {
+      await _storage.setActivePlaylistSource(state.first.id);
+    }
+    await _storage.savePlaylistSource(
+      state.isEmpty ? source.copyWith(isActive: true) : source,
+    );
     _loadSources();
   }
 
@@ -222,15 +239,31 @@ class ChannelStateNotifier extends StateNotifier<ChannelState> {
         ];
       }
 
-      // Apply favorite status from storage
+      // Apply favorite status and watch history from storage. History used to
+      // be written on every tune but never read back, so "Recently Watched"
+      // was empty after every restart.
       final favoriteIds = _storage.getFavoriteChannels().map((c) => c.id).toSet();
-      channels = channels.map((c) => c.copyWith(isFavorite: favoriteIds.contains(c.id))).toList();
+      final lastWatched = {
+        for (final c in _storage.getChannelHistory())
+          if (c.lastWatched != null) c.id: c.lastWatched!,
+      };
+      channels = channels
+          .map((c) => c.copyWith(
+                isFavorite: favoriteIds.contains(c.id),
+                lastWatched: lastWatched[c.id],
+              ))
+          .toList();
 
-      // Update favorites count
+      // Update favorites and recent counts
       final favCount = channels.where((c) => c.isFavorite).length;
+      final recentCount =
+          channels.where((c) => c.lastWatched != null).take(20).length;
       categories = categories.map((cat) {
         if (cat.id == 'favorites') {
           return cat.copyWith(channelCount: favCount);
+        }
+        if (cat.id == 'recent') {
+          return cat.copyWith(channelCount: recentCount);
         }
         return cat;
       }).toList();
@@ -414,7 +447,13 @@ class VODStateNotifier extends StateNotifier<VODState> {
       state = state.copyWith(
         items: updatedItems,
         categories: [
-          Category.all(count: items.length),
+          Category.all(count: items.length, name: 'All Movies'),
+          // Not on TV: the poster's heart is excluded from D-pad traversal
+          // there (see _VODCard), so the list could never be filled.
+          if (!kIsTv)
+            Category.favorites(
+              count: updatedItems.where((v) => v.isFavorite).length,
+            ),
           ...categories,
         ],
         isLoading: false,
@@ -441,7 +480,15 @@ class VODStateNotifier extends StateNotifier<VODState> {
       return v;
     }).toList();
 
-    state = state.copyWith(items: updatedItems);
+    final favCount = updatedItems.where((v) => v.isFavorite).length;
+    final updatedCategories = state.categories.map((cat) {
+      if (cat.id == 'favorites') {
+        return cat.copyWith(channelCount: favCount);
+      }
+      return cat;
+    }).toList();
+
+    state = state.copyWith(items: updatedItems, categories: updatedCategories);
   }
 
   List<VODItem> searchVOD(String query) {

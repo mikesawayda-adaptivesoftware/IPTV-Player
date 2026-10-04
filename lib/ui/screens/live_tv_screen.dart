@@ -7,7 +7,9 @@ import '../../core/utils/extensions.dart';
 import '../../data/models/channel.dart';
 import '../../providers/playlist_provider.dart';
 import '../player/enhanced_video_player.dart';
+import '../../providers/navigation_provider.dart';
 import '../widgets/category_sidebar.dart';
+import '../widgets/empty_state.dart';
 import '../widgets/search_bar_widget.dart';
 import '../widgets/loading_widget.dart';
 import '../widgets/error_widget.dart';
@@ -41,6 +43,9 @@ class _LiveTVScreenState extends ConsumerState<LiveTVScreen> {
       return AppErrorWidget(
         message: channelState.error!,
         onRetry: () => ref.read(channelStateProvider.notifier).loadChannels(activePlaylist),
+        secondaryLabel: 'Playlist settings',
+        onSecondary: () =>
+            ref.read(homeTabProvider.notifier).state = HomeTab.settings,
       );
     }
 
@@ -73,7 +78,7 @@ class _LiveTVScreenState extends ConsumerState<LiveTVScreen> {
               // Channel list
               Expanded(
                 child: filteredChannels.isEmpty
-                    ? _buildEmptyView()
+                    ? _buildEmptyView(channelState)
                     : _buildChannelList(filteredChannels),
               ),
             ],
@@ -100,7 +105,8 @@ class _LiveTVScreenState extends ConsumerState<LiveTVScreen> {
                       style: Theme.of(context).textTheme.displaySmall,
                     ),
                     Text(
-                      '$channelCount channels available',
+                      '${channelCount.grouped} '
+                      '${channelCount == 1 ? 'channel' : 'channels'}',
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
                   ],
@@ -158,13 +164,22 @@ class _LiveTVScreenState extends ConsumerState<LiveTVScreen> {
   }
 
   Widget _buildChannelList(List<Channel> channels) {
+    // Watched so the list picks up "now playing" once the guide finishes
+    // loading, which is usually after the channels are already on screen.
+    ref.watch(epgStateProvider);
+    final epg = ref.read(epgStateProvider.notifier);
+
     return ListView.builder(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       itemCount: channels.length,
       itemBuilder: (context, index) {
         final channel = channels[index];
+        final epgId = channel.epgChannelId;
         return _ChannelListTile(
           channel: channel,
+          nowPlaying: epgId == null || epgId.isEmpty
+              ? null
+              : epg.getCurrentProgram(epgId)?.title,
           onTap: () => _playChannel(channel),
           onFavoriteToggle: () {
             ref.read(channelStateProvider.notifier).toggleFavorite(channel);
@@ -176,52 +191,46 @@ class _LiveTVScreenState extends ConsumerState<LiveTVScreen> {
   }
 
   Widget _buildNoPlaylistView() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.playlist_add,
-            size: 64,
-            color: AppTheme.textMuted.withOpacity(0.5),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'No playlist configured',
-            style: Theme.of(context).textTheme.headlineSmall,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Go to Settings to add an M3U or Xtream playlist',
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
-        ],
-      ),
+    return EmptyState(
+      icon: Icons.playlist_add,
+      title: 'No playlist yet',
+      message: 'Add an M3U playlist or an Xtream Codes login to start watching.',
+      actionLabel: 'Add a playlist',
+      actionIcon: Icons.add,
+      onAction: () =>
+          ref.read(homeTabProvider.notifier).state = HomeTab.settings,
     );
   }
 
-  Widget _buildEmptyView() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.search_off,
-            size: 64,
-            color: AppTheme.textMuted.withOpacity(0.5),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'No channels found',
-            style: Theme.of(context).textTheme.headlineSmall,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Try adjusting your search or category filter',
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
-        ],
-      ),
+  Widget _buildEmptyView(ChannelState state) {
+    if (_searchQuery.isNotEmpty) {
+      return EmptyState(
+        icon: Icons.search_off,
+        title: 'No matches for "$_searchQuery"',
+        message: state.selectedCategoryId == null ||
+                state.selectedCategoryId == 'all'
+            ? 'Check the spelling, or try part of the channel name.'
+            : 'Only this category was searched. Try All Channels.',
+      );
+    }
+    switch (state.selectedCategoryId) {
+      case 'favorites':
+        return const EmptyState(
+          icon: Icons.favorite_border,
+          title: 'No favorites yet',
+          message: 'Tap the heart on any channel to keep it here.',
+        );
+      case 'recent':
+        return const EmptyState(
+          icon: Icons.history,
+          title: 'Nothing watched yet',
+          message: 'Channels you watch will appear here.',
+        );
+    }
+    return const EmptyState(
+      icon: Icons.live_tv,
+      title: 'No channels here',
+      message: 'This category is empty. Try another one, or refresh the playlist.',
     );
   }
 
@@ -251,8 +260,12 @@ class _ChannelListTile extends StatelessWidget {
   final VoidCallback onFavoriteToggle;
   final VoidCallback? onMiniPlayer;
 
+  /// Title of the programme on air, when the guide has one.
+  final String? nowPlaying;
+
   const _ChannelListTile({
     required this.channel,
+    this.nowPlaying,
     required this.onTap,
     required this.onFavoriteToggle,
     this.onMiniPlayer,
@@ -271,17 +284,36 @@ class _ChannelListTile extends StatelessWidget {
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
         ),
-        subtitle: channel.groupTitle != null
-            ? Text(
-                channel.groupTitle!,
-                style: TextStyle(
-                  color: AppTheme.textMuted,
-                  fontSize: 12,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+        // What is on beats which folder the channel lives in, when known.
+        subtitle: nowPlaying != null
+            ? Row(
+                children: [
+                  const Icon(Icons.circle, size: 6, color: AppTheme.errorColor),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      nowPlaying!,
+                      style: const TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 12,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
               )
-            : null,
+            : channel.groupTitle != null
+                ? Text(
+                    channel.groupTitle!,
+                    style: TextStyle(
+                      color: AppTheme.textMuted,
+                      fontSize: 12,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  )
+                : null,
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -291,7 +323,9 @@ class _ChannelListTile extends StatelessWidget {
                 color: channel.isFavorite ? AppTheme.errorColor : AppTheme.textMuted,
               ),
               onPressed: onFavoriteToggle,
-              tooltip: 'Favorite',
+              tooltip: channel.isFavorite
+                  ? 'Remove from favorites'
+                  : 'Add to favorites',
             ),
             if (onMiniPlayer != null)
               IconButton(
@@ -313,44 +347,53 @@ class _ChannelListTile extends StatelessWidget {
   }
 
   Widget _buildLogo() {
-    if (channel.logoUrl != null && channel.logoUrl!.isNotEmpty) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: CachedNetworkImage(
-          imageUrl: channel.logoUrl!,
-          width: 48,
-          height: 48,
-          fit: BoxFit.cover,
-          placeholder: (context, url) => Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: AppTheme.surfaceColor,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: const Icon(Icons.tv, color: AppTheme.textMuted),
-          ),
-          errorWidget: (context, url, error) => Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: AppTheme.surfaceColor,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: const Icon(Icons.tv, color: AppTheme.textMuted),
-          ),
-        ),
-      );
-    }
-
+    // Contain, not cover: channel logos are mostly wide wordmarks, and cover
+    // cropped "ESPN" down to "SP". The tile behind it gives transparent logos
+    // a consistent backing.
     return Container(
       width: 48,
       height: 48,
+      padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
         color: AppTheme.surfaceColor,
         borderRadius: BorderRadius.circular(8),
       ),
-      child: const Icon(Icons.tv, color: AppTheme.textMuted),
+      child: channel.logoUrl != null && channel.logoUrl!.isNotEmpty
+          ? CachedNetworkImage(
+              imageUrl: channel.logoUrl!,
+              fit: BoxFit.contain,
+              // Decode at display size, not the provider's 1000px original:
+              // a long list of full-size logos is a lot of memory on a TV box.
+              memCacheHeight: 128,
+              placeholder: (context, url) => _monogram(),
+              errorWidget: (context, url, error) => _monogram(),
+            )
+          : _monogram(),
+    );
+  }
+
+  static final _prefix =
+      RegExp(r'^\s*(\|[^|]{1,6}\||\[[^\]]{1,6}\]|[A-Za-z0-9]{2,4}\s*[:|])\s*');
+
+  /// First letter of the channel name, so logo-less channels are still told
+  /// apart at a glance instead of being a column of identical TV icons.
+  Widget _monogram() {
+    // Skip a bouquet prefix - `US: ESPN`, `|UK| BBC One`, `[FR] TF1` - or
+    // every channel in a country would get the same letter.
+    final name = channel.name
+        .replaceFirst(_prefix, '')
+        .replaceAll(RegExp(r'^[^A-Za-z0-9]+'), '');
+    return Center(
+      child: name.isEmpty
+          ? const Icon(Icons.tv, color: AppTheme.textMuted)
+          : Text(
+              name[0].toUpperCase(),
+              style: const TextStyle(
+                color: AppTheme.textSecondary,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
     );
   }
 }
