@@ -8,6 +8,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../core/constants/app_constants.dart';
+import '../../core/fantasy/fantasy_zone.dart';
 import '../../core/player/quality_controller.dart';
 import '../../core/player/stream_quality.dart';
 import '../../core/player/stream_tuning.dart';
@@ -18,6 +19,7 @@ import '../../core/theme/app_theme.dart';
 import '../../core/utils/extensions.dart';
 import '../../data/models/channel.dart';
 import '../../data/services/storage_service.dart';
+import '../../providers/fantasy_zone_provider.dart';
 import '../../providers/playlist_provider.dart';
 import '../widgets/tv_focusable.dart';
 
@@ -57,12 +59,18 @@ class EnhancedVideoPlayer extends ConsumerStatefulWidget {
   final VoidCallback? onClose;
   final VoidCallback? onMinimize;
 
+  /// Follow the Fantasy Zone: tune to whichever game the user's fantasy
+  /// players are doing something in. The caller has already started it with
+  /// [FantasyZoneNotifier.start]; this player stops it on the way out.
+  final bool fantasyZone;
+
   const EnhancedVideoPlayer({
     super.key,
     required this.channel,
     this.isLive = true,
     this.onClose,
     this.onMinimize,
+    this.fantasyZone = false,
   });
 
   @override
@@ -98,6 +106,16 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
   /// Drives the now/next banner shown after a channel change.
   Timer? _bannerTimer;
   bool _showChannelBanner = false;
+
+  /// Captured in initState so dispose can stop the zone without touching
+  /// `ref` on the way out.
+  FantasyZoneNotifier? _zone;
+
+  /// Whether zone announcements still move this player. Cleared when the user
+  /// changes channel by hand, so the next poll does not yank them back.
+  bool _zoneFollowing = false;
+  ZoneTarget? _zoneBanner;
+  Timer? _zoneBannerTimer;
 
   double _bufferHealth = 0.0;
 
@@ -145,6 +163,16 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     super.initState();
     _currentChannel = widget.channel;
     _streamUrl = widget.channel.streamUrl;
+    if (widget.fantasyZone) {
+      _zone = ref.read(fantasyZoneProvider.notifier);
+      _zoneFollowing = true;
+      final target = ref.read(fantasyZoneProvider).target;
+      if (target != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _flashZoneBanner(target);
+        });
+      }
+    }
 
     // Go immersive the moment the player opens: hide the phone's status bar and
     // navigation buttons so video is truly full-screen. Restored in dispose.
@@ -552,6 +580,10 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     TvPlatform.releaseKeepScreenOn();
     _hideTimer?.cancel();
     _bannerTimer?.cancel();
+    _zoneBannerTimer?.cancel();
+    // Deferred: Riverpod refuses provider writes from widget lifecycle calls.
+    final zone = _zone;
+    if (zone != null) Future.microtask(zone.stop);
     _statsTimer?.cancel();
     _pictureTimer?.cancel();
     _quality.dispose();
@@ -653,13 +685,43 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     });
   }
 
+  /// Shows what the Fantasy Zone just switched to, or found, and why.
+  void _flashZoneBanner(ZoneTarget target) {
+    _zoneBannerTimer?.cancel();
+    setState(() => _zoneBanner = target);
+    _zoneBannerTimer = Timer(const Duration(seconds: 8), () {
+      if (mounted) setState(() => _zoneBanner = null);
+    });
+  }
+
+  void _onZoneTarget(ZoneTarget? previous, ZoneTarget? next) {
+    if (!_zoneFollowing || next == null || next.serial == previous?.serial) {
+      return;
+    }
+    if (next.channel.id != _currentChannel.id) _switchChannel(next.channel);
+    _flashZoneBanner(next);
+  }
+
+  void _setZoneFollowing(bool following) {
+    final zone = _zone;
+    if (zone == null || following == _zoneFollowing) return;
+    setState(() => _zoneFollowing = following);
+    if (following) {
+      zone.resume();
+    } else {
+      zone.pause();
+    }
+  }
+
   void _nextChannel() {
+    _setZoneFollowing(false);
     final next =
         ref.read(channelStateProvider.notifier).getNextChannel(_currentChannel);
     if (next != null) _switchChannel(next);
   }
 
   void _previousChannel() {
+    _setZoneFollowing(false);
     final previous = ref
         .read(channelStateProvider.notifier)
         .getPreviousChannel(_currentChannel);
@@ -888,6 +950,13 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
       }
     });
 
+    if (widget.fantasyZone) {
+      ref.listen<ZoneTarget?>(
+        fantasyZoneProvider.select((s) => s.target),
+        _onZoneTarget,
+      );
+    }
+
     final controller = _controller;
 
     // canRequestFocus/skipTraversal false is the whole point. This used to be
@@ -967,6 +1036,9 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
               if (widget.isLive && _errorMessage == null)
                 _buildChannelBanner(),
 
+              if (widget.fantasyZone && _errorMessage == null)
+                _buildZoneBanner(),
+
               if (_showStats) _buildStatsOverlay(),
             ],
           ),
@@ -1040,6 +1112,92 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
                         if (next != null)
                           _bannerProgram(
                               'Next', next.title, _hhmm(next.startTime)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Top of the screen, so it never sits on the channel banner below. While
+  /// the zone is following and nothing new has happened it shrinks to a tag,
+  /// which is how the user can tell the zone is still steering.
+  Widget _buildZoneBanner() {
+    final target = _zoneBanner;
+    final showTag = _zoneFollowing && !_showControls;
+    return Positioned(
+      top: 24 + _overlayInset,
+      left: 24 + _overlayInset,
+      right: 24 + _overlayInset,
+      child: IgnorePointer(
+        child: AnimatedOpacity(
+          opacity: target != null || showTag ? 1.0 : 0.0,
+          duration: const Duration(milliseconds: 250),
+          child: Center(
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 640),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.75),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: target?.reason == ZoneReason.score
+                      ? AppTheme.accentColor
+                      : Colors.white12,
+                  width: target?.reason == ZoneReason.score ? 2 : 1,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.sports_football,
+                    color: AppTheme.accentColor,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 10),
+                  Flexible(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _zoneFollowing
+                              ? 'FANTASY ZONE'
+                              : 'FANTASY ZONE PAUSED',
+                          style: const TextStyle(
+                            color: AppTheme.accentColor,
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        if (target != null) ...[
+                          Text(
+                            target.headline,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          Text(
+                            '${target.game.label}  ${target.game.awayScore}-'
+                            '${target.game.homeScore}  ${target.game.detail}',
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.7),
+                              fontSize: 12,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -1602,6 +1760,18 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
                     _showStats ? 'Hide stream stats' : 'Show stream stats',
                     shortcut: 'I',
                   ),
+                  if (widget.fantasyZone)
+                    item(
+                      sheetContext,
+                      _PlayerAction.fantasyZone,
+                      Icons.sports_football,
+                      _zoneFollowing
+                          ? 'Pause Fantasy Zone'
+                          : 'Resume Fantasy Zone',
+                      subtitle: _zoneFollowing
+                          ? 'Stay on this channel'
+                          : 'Follow your players again',
+                    ),
                   item(
                     sheetContext,
                     _PlayerAction.reconnect,
@@ -1655,6 +1825,8 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
         await _showQualityPicker();
       case _PlayerAction.stats:
         _toggleStats();
+      case _PlayerAction.fantasyZone:
+        _setZoneFollowing(!_zoneFollowing);
       case _PlayerAction.reconnect:
         await _manualReconnect();
       case _PlayerAction.minimize:
@@ -2212,6 +2384,7 @@ enum _PlayerAction {
   mute,
   quality,
   stats,
+  fantasyZone,
   reconnect,
   minimize,
   fullscreen,

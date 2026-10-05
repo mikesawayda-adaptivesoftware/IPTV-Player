@@ -466,6 +466,30 @@ triggered it. Automatic degradation there needs cross-slot coordination. The VOD
 nothing — it is handed a bare URL with no `Channel`, so there is nothing to look siblings up
 by.
 
+### Fantasy Zone
+
+A personal RedZone: Sleeper rosters plus ESPN's live scoreboard decide which game the live
+player should be on. Opened from the football button in the Live TV header; linked in
+Settings.
+
+- `data/services/sleeper_service.dart` - Sleeper's public read-only API (username, no login).
+  `/players/nfl` is ~5 MB and Sleeper asks for at most one fetch a day, so player details are
+  cached in the settings box and parsed off the UI isolate.
+- `data/services/espn_service.dart` - ESPN's **unofficial** scoreboard. Sleeper has no
+  play-by-play. `parseScoreboard` drops a malformed game rather than throwing.
+- `core/fantasy/fantasy_zone.dart` - the pure ranking and switching rules (touchdown > big
+  play > red zone > merely on; minimum dwell; never quiet game to quiet game). A game's first
+  sighting only records its state, so a score from before the zone opened is not news.
+- `core/fantasy/game_channels.dart` - game to channel: the channel *name* first (providers'
+  per-game channels), then the current guide title on NFL-category and network channels.
+  Same bias as the quality grouping: exactly the two teams, or no match. Bare abbreviations
+  only count inside a matchup (`BUF @ MIA`), because `NO`, `NE` and `TEN` are words.
+- The player follows `fantasyZoneProvider.target` only while `fantasyZone: true`. Up/Down
+  pauses following (the next poll must not yank the user back); the Options sheet resumes.
+
+No recording: the zone switches live, before the score, like RedZone. Replays would need a
+background capture per game, which most Xtream plans' connection limit rules out.
+
 ### Testing freeze recovery
 
 Unit tests cover the ladder's decision-making with no player attached. To exercise the
