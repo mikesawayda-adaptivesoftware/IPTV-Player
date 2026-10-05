@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/theme/app_theme.dart';
 
@@ -27,6 +30,15 @@ class TvFocusable extends StatefulWidget {
   /// does not become a dead stop in the traversal order.
   final VoidCallback? onTap;
 
+  /// Invoked by a pointer long-press and by holding OK on the remote.
+  ///
+  /// When set, Select / Enter are handled here instead of through
+  /// [ActivateIntent], and [onTap] fires on key *up* - it has to wait to learn
+  /// whether the press was short. Android TV has no other secondary action on
+  /// most remotes (the Google TV remote has no Menu key), so hold-OK is the
+  /// platform's convention for one.
+  final VoidCallback? onLongPress;
+
   final bool autofocus;
   final FocusNode? focusNode;
 
@@ -39,6 +51,7 @@ class TvFocusable extends StatefulWidget {
     super.key,
     required this.child,
     this.onTap,
+    this.onLongPress,
     this.autofocus = false,
     this.focusNode,
     this.borderRadius = const BorderRadius.all(Radius.circular(8)),
@@ -52,6 +65,55 @@ class TvFocusable extends StatefulWidget {
 class _TvFocusableState extends State<TvFocusable> {
   bool _focused = false;
 
+  static const _longPressDelay = Duration(milliseconds: 500);
+
+  static final _selectKeys = {
+    LogicalKeyboardKey.select,
+    LogicalKeyboardKey.enter,
+    LogicalKeyboardKey.numpadEnter,
+  };
+
+  /// The OK key currently held down on this control, if its down was ours.
+  LogicalKeyboardKey? _heldKey;
+  Timer? _longPressTimer;
+  bool _longPressFired = false;
+
+  @override
+  void dispose() {
+    _longPressTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Splits OK into a short press and a hold.
+  ///
+  /// Both edges are consumed. The down has to be, or the app's default
+  /// shortcut would activate on it before a hold could be detected; the up has
+  /// to be, or it reaches the Android activity unclaimed. An up whose down
+  /// went somewhere else - OK pressed on the previous screen - is left alone.
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (widget.onLongPress == null || widget.onTap == null) {
+      return KeyEventResult.ignored;
+    }
+    if (!_selectKeys.contains(event.logicalKey)) return KeyEventResult.ignored;
+    if (event is KeyDownEvent) {
+      _heldKey = event.logicalKey;
+      _longPressFired = false;
+      _longPressTimer?.cancel();
+      _longPressTimer = Timer(_longPressDelay, () {
+        _longPressFired = true;
+        widget.onLongPress?.call();
+      });
+      return KeyEventResult.handled;
+    }
+    if (_heldKey != event.logicalKey) return KeyEventResult.ignored;
+    if (event is KeyUpEvent) {
+      _heldKey = null;
+      _longPressTimer?.cancel();
+      if (!_longPressFired) widget.onTap?.call();
+    }
+    return KeyEventResult.handled;
+  }
+
   @override
   Widget build(BuildContext context) {
     // Flutter's default shortcuts already map Enter, Space, numpadEnter,
@@ -59,7 +121,7 @@ class _TvFocusableState extends State<TvFocusable> {
     // D-pad centre, Android keycode 23) onto ActivateIntent. So binding
     // ActivateIntent here is all that is needed to make the remote's OK button
     // work; there is no key mapping to write.
-    return FocusableActionDetector(
+    final detector = FocusableActionDetector(
       focusNode: widget.focusNode,
       autofocus: widget.autofocus,
       enabled: widget.onTap != null,
@@ -80,6 +142,7 @@ class _TvFocusableState extends State<TvFocusable> {
         button: widget.onTap != null,
         child: GestureDetector(
           onTap: widget.onTap,
+          onLongPress: widget.onLongPress,
           // foregroundDecoration, not decoration: a border in the latter is
           // added to the box's padding, so focusing a control would reflow
           // everything around it. Painted over the child instead, the ring
@@ -98,6 +161,15 @@ class _TvFocusableState extends State<TvFocusable> {
           ),
         ),
       ),
+    );
+    // Always present, so adding or removing onLongPress does not change the
+    // tree shape and drop focus. An ancestor of the detector's own node, so it sees OK before the app's
+    // Shortcuts do - key events bubble from the focused node upwards.
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: _onKey,
+      child: detector,
     );
   }
 }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/extensions.dart';
 import '../../data/models/category.dart';
 
 class CategorySidebar extends StatelessWidget {
@@ -18,7 +19,8 @@ class CategorySidebar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 220,
+      // A little wider on TV, where the text is scaled up by the theme.
+      width: context.isTv ? 250 : 220,
       decoration: BoxDecoration(
         color: AppTheme.surfaceColor,
         border: Border(
@@ -103,6 +105,11 @@ class _CategoryTile extends StatelessWidget {
       ),
       child: ListTile(
         dense: true,
+        // The TV theme's roomy 24dp list padding is meant for full-width
+        // lists; in a sidebar it left category names a few letters wide.
+        contentPadding: context.isTv
+            ? const EdgeInsets.symmetric(horizontal: 12)
+            : null,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(8),
         ),

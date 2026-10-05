@@ -691,6 +691,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         content: Text('Are you sure you want to delete "${source.name}"?'),
         actions: [
           TextButton(
+            // Nothing was focused when the dialog opened, so the remote's
+            // first press landed wherever traversal guessed. Cancel is the
+            // safe place to start on a destructive prompt.
+            autofocus: context.isTv,
             onPressed: () => Navigator.pop(context),
             child: const Text('Cancel'),
           ),

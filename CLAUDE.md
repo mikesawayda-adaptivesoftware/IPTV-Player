@@ -245,6 +245,19 @@ Things that are the way they are for a reason:
   app mid-playback. A `PopScope` in that subtree intercepts it and minimises instead. The
   shell is also `ExcludeFocus`d while it is up, or the rail and channel list stay traversable
   behind the video.
+- **TV gets its own navigation rail** (`_buildTvRail` in `home_screen`), not the phone's
+  bottom bar, which sat below the channel list and could only be reached by scrolling past
+  every channel. It is hand-built so each destination has a `FocusNode`: moving along it
+  switches tabs, OK steps into the content, and focus arriving from the content is redirected
+  to the current tab rather than switching to whichever item was nearest. Back climbs
+  content -> rail -> Live TV -> exit (a `PopScope` that skips while the expanded mini player
+  is minimising). A `FocusManager` listener puts focus back on the rail whenever the shell's
+  focus is lost outright, e.g. Refresh swapping a tab's body for a spinner.
+- **TV uses the vertical `CategorySidebar`**, not the chip row, on Live TV and Movies: a real
+  subscription has hundreds of categories, walked one Right press at a time as chips.
+- **Hold OK is the TV secondary action.** `TvFocusable.onLongPress` splits Select into a
+  short press (fires on key-up) and a 500ms hold; a VOD poster's hold toggles its favourite,
+  since the heart is excluded from focus. The Google TV remote has no Menu key.
 - **`IndexedStack` needs `ExcludeFocus` on its inactive children.** It keeps every child laid
   out with a real focus rect and only skips painting, so without that the D-pad wanders into
   Settings while Live TV is on screen.
@@ -252,7 +265,10 @@ Things that are the way they are for a reason:
   letterbox the video. Existing `SafeArea`s then work for free. The player's `Stack` is
   deliberately full-bleed, so its absolutely-positioned overlays add `_overlayInset`
   themselves.
-- **The EPG uses two one-dimensional panes on TV**, not the desktop grid. Two-axis traversal
+- **The EPG uses two one-dimensional panes on TV**, not the desktop grid. The programme pane
+  starts at what is on now (ended programmes are dropped), its details sheet has a Watch
+  button, and "Jump to now" is desktop-only - it scrolls a controller the TV layout never
+  attaches. Two-axis traversal
   over virtualised content dead-ends past the `ListView` cache extent, and the grid is
   1 + N unsynchronised scrollers rather than a real grid. The channel pane raises
   `cacheExtent` because an unmounted focused node teleports focus to the top of the scope.
