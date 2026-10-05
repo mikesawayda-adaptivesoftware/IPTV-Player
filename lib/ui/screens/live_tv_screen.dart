@@ -55,8 +55,11 @@ class _LiveTVScreenState extends ConsumerState<LiveTVScreen> {
 
     return Row(
       children: [
-        // Categories sidebar (desktop only)
-        if (isDesktop)
+        // Categories sidebar on desktop and TV. TV used to get the phone's
+        // horizontal chip row, which on a real subscription is hundreds of
+        // categories long and has to be walked one Right press at a time.
+        // A vertical list is one Left away from the content and scrolls.
+        if (isDesktop || context.isTv)
           CategorySidebar(
             categories: channelState.categories,
             selectedCategoryId: channelState.selectedCategoryId,
@@ -72,8 +75,8 @@ class _LiveTVScreenState extends ConsumerState<LiveTVScreen> {
               // Header with search
               _buildHeader(channelState.categories.length, filteredChannels.length),
               
-              // Category chips (mobile only)
-              if (!isDesktop) _buildCategoryChips(channelState),
+              // Category chips (phone and tablet only)
+              if (!isDesktop && !context.isTv) _buildCategoryChips(channelState),
               
               // Channel list
               Expanded(

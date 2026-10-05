@@ -139,11 +139,15 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
                 },
                 tooltip: 'Refresh guide',
               ),
-              IconButton(
-                icon: const Icon(Icons.today),
-                onPressed: _scrollToNow,
-                tooltip: 'Jump to now',
-              ),
+              // Desktop grid only. The TV layout never attaches the horizontal
+              // controller this scrolls, so pressing it there threw; and its
+              // programme pane already starts at what is on now.
+              if (!context.isTv)
+                IconButton(
+                  icon: const Icon(Icons.today),
+                  onPressed: _scrollToNow,
+                  tooltip: 'Jump to now',
+                ),
             ],
           ),
           const SizedBox(height: 12),
@@ -369,7 +373,13 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
       orElse: () => channels.first,
     );
     final selectedEpgId = selected.epgChannelId ?? selected.id;
-    final programs = epgData[selectedEpgId] ?? const <EPGProgram>[];
+    // From what is on now onwards. A guide holds the whole day, so the pane
+    // used to open on programmes that ended hours ago, with the current one
+    // somewhere below - a long walk with the D-pad to find out what is on,
+    // for listings nobody can watch anyway.
+    final programs = (epgData[selectedEpgId] ?? const <EPGProgram>[])
+        .where((p) => p.endTime.isAfter(now))
+        .toList();
 
     return Row(
       children: [
@@ -432,7 +442,7 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
             child: programs.isEmpty
                 ? Center(
                     child: Text(
-                      'No program information for ${selected.name}',
+                      'No upcoming programs for ${selected.name}',
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
                   )
@@ -479,7 +489,8 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
                                 visualDensity: VisualDensity.compact,
                               )
                             : null,
-                        onTap: () => _showProgramDetails(program),
+                        onTap: () =>
+                            _showProgramDetails(program, channel: selected),
                       );
                     },
                   ),
@@ -716,7 +727,10 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
     );
   }
 
-  void _showProgramDetails(EPGProgram program) {
+  /// [channel], when given, adds a Watch button - the TV programme pane's
+  /// details sheet is otherwise a dead end that has to be backed out of and
+  /// re-navigated to play the channel it describes.
+  void _showProgramDetails(EPGProgram program, {Channel? channel}) {
     showModalBottomSheet(
       context: context,
       backgroundColor: AppTheme.surfaceColor,
@@ -724,7 +738,10 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (context) {
-        return Padding(
+        // Scrollable: a long description overflowed the sheet's height cap,
+        // which on a 540dp-tall TV screen is not much, and pushed the Watch
+        // button off the bottom.
+        return SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -774,6 +791,22 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
                 Chip(
                   label: Text(program.category!),
                   backgroundColor: AppTheme.primaryColor.withOpacity(0.2),
+                ),
+              ],
+              if (channel != null) ...[
+                const SizedBox(height: 20),
+                ElevatedButton.icon(
+                  autofocus: context.isTv,
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    _playChannel(channel);
+                  },
+                  icon: const Icon(Icons.play_arrow),
+                  label: Text(
+                    'Watch ${channel.name}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
               ],
               const SizedBox(height: 24),

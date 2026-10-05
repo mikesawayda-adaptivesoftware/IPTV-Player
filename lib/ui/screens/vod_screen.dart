@@ -61,8 +61,11 @@ class _VODScreenState extends ConsumerState<VODScreen> {
 
     return Row(
       children: [
-        // Categories sidebar (desktop only)
-        if (isDesktop)
+        // Categories sidebar on desktop and TV. TV used to get the phone's
+        // horizontal chip row, which on a real subscription is hundreds of
+        // categories long and has to be walked one Right press at a time.
+        // A vertical list is one Left away from the content and scrolls.
+        if (isDesktop || context.isTv)
           CategorySidebar(
             categories: vodState.categories,
             selectedCategoryId: vodState.selectedCategoryId,
@@ -78,8 +81,8 @@ class _VODScreenState extends ConsumerState<VODScreen> {
               // Header with search
               _buildHeader(vodState.categories.length, filteredItems.length),
               
-              // Category chips (mobile only)
-              if (!isDesktop) _buildCategoryChips(vodState),
+              // Category chips (phone and tablet only)
+              if (!isDesktop && !context.isTv) _buildCategoryChips(vodState),
               
               // VOD grid
               Expanded(
@@ -111,7 +114,10 @@ class _VODScreenState extends ConsumerState<VODScreen> {
                       style: Theme.of(context).textTheme.displaySmall,
                     ),
                     Text(
-                      '${itemCount.grouped} ${itemCount == 1 ? 'title' : 'titles'}',
+                      '${itemCount.grouped} ${itemCount == 1 ? 'title' : 'titles'}'
+                      // The poster's heart is not a focus stop on TV, so say
+                      // how favourites work there.
+                      '${context.isTv ? ' • Hold OK on a poster to favorite it' : ''}',
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
                   ],
@@ -170,8 +176,8 @@ class _VODScreenState extends ConsumerState<VODScreen> {
 
   Widget _buildVODGrid(List<VODItem> items) {
     final isDesktop = context.isDesktop;
-    // A 1080p TV is only about 960dp wide at density 2.0, and the rail and
-    // category sidebar take ~300 of that - six columns would leave ~96dp
+    // A 1080p TV is only about 960dp wide at density 2.0, and the overscan
+    // margin, rail and category sidebar take ~450 of that - six columns would leave ~96dp
     // posters, unreadable from a sofa.
     final crossAxisCount = context.isTv
         ? 3
@@ -193,7 +199,15 @@ class _VODScreenState extends ConsumerState<VODScreen> {
           item: items[index],
           onTap: () => _playVOD(items[index]),
           onFavoriteToggle: () {
-            ref.read(vodStateProvider.notifier).toggleFavorite(items[index]);
+            final item = items[index];
+            ref.read(vodStateProvider.notifier).toggleFavorite(item);
+            // On TV the change happens on a hold with no button under the
+            // focus ring, so confirm it.
+            if (context.isTv) {
+              context.showSnackBar(item.isFavorite
+                  ? 'Removed "${item.name}" from favorites'
+                  : 'Added "${item.name}" to favorites');
+            }
           },
         );
       },
@@ -233,10 +247,12 @@ class _VODScreenState extends ConsumerState<VODScreen> {
       );
     }
     if (state.selectedCategoryId == 'favorites') {
-      return const EmptyState(
+      return EmptyState(
         icon: Icons.favorite_border,
         title: 'No favorite movies yet',
-        message: 'Tap the heart on any poster to keep it here.',
+        message: context.isTv
+            ? 'Hold OK on any poster to keep it here.'
+            : 'Tap the heart on any poster to keep it here.',
       );
     }
     return const EmptyState(
@@ -285,6 +301,9 @@ class _VODCard extends StatelessWidget {
     // single node fixes the geometry rather than papering over it.
     return TvFocusable(
       onTap: onTap,
+      // The favourite button is excluded from focus on TV (below), so holding
+      // OK is the remote's way to it. Touch keeps the visible heart.
+      onLongPress: kIsTv ? onFavoriteToggle : null,
       borderRadius: BorderRadius.circular(12),
       semanticLabel: item.name,
       child: Container(
