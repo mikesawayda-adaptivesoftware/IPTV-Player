@@ -34,6 +34,7 @@ class CastBridge {
   final _devices = StreamController<List<CastDevice>>.broadcast();
   final _session = StreamController<String>.broadcast();
   final _receiver = StreamController<ReceiverStatus>.broadcast();
+  final _stopRequested = StreamController<void>.broadcast();
 
   /// Devices currently visible. Updated as they appear and disappear.
   Stream<List<CastDevice>> get devices => _devices.stream;
@@ -42,6 +43,10 @@ class CastBridge {
   Stream<String> get session => _session.stream;
 
   Stream<ReceiverStatus> get receiver => _receiver.stream;
+
+  /// The notification's Stop was tapped. The listener owns the teardown, so
+  /// the provider connection can be closed before anything else.
+  Stream<void> get stopRequested => _stopRequested.stream;
 
   CastBridge() {
     _channel.setMethodCallHandler(_onCall);
@@ -61,8 +66,16 @@ class CastBridge {
   /// Stops playback and ends the session, closing the receiver app.
   Future<void> disconnect() => _channel.invokeMethod('disconnect');
 
+  /// Keeps the phone relaying with the screen off, behind a "Casting to"
+  /// notification. Call again on a channel change to update its text.
+  Future<void> keepAlive({required String title, required String device}) =>
+      _channel.invokeMethod('keepAlive', {'title': title, 'device': device});
+
+  Future<void> releaseKeepAlive() => _channel.invokeMethod('releaseKeepAlive');
+
   void dispose() {
     _channel.setMethodCallHandler(null);
+    _stopRequested.close();
     _devices.close();
     _session.close();
     _receiver.close();
@@ -83,6 +96,8 @@ class CastBridge {
         _devices.add(list);
       case 'session':
         _session.add(args as String);
+      case 'stopRequested':
+        _stopRequested.add(null);
       case 'receiver':
         final map = args as Map;
         _receiver.add(ReceiverStatus(

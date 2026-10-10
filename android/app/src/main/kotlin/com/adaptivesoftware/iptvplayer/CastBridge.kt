@@ -1,6 +1,10 @@
 package com.adaptivesoftware.iptvplayer
 
+import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.mediarouter.media.MediaRouteSelector
 import androidx.mediarouter.media.MediaRouter
 import com.google.android.gms.cast.CastMediaControlIntent
@@ -44,7 +48,11 @@ class CastOptionsProvider : OptionsProvider {
  * framework start a session; everything after that goes through the
  * session's RemoteMediaClient.
  */
-class CastBridge(private val context: Context, messenger: BinaryMessenger) {
+class CastBridge(
+    private val activity: Activity,
+    messenger: BinaryMessenger,
+) {
+    private val context: Context = activity.applicationContext
 
     companion object {
         const val CHANNEL = "com.adaptivesoftware.iptvplayer/cast"
@@ -63,6 +71,7 @@ class CastBridge(private val context: Context, messenger: BinaryMessenger) {
             .build()
     }
     private var discovering = false
+    private var keptAlive = false
     private var mediaClient: RemoteMediaClient? = null
 
     init {
@@ -89,6 +98,18 @@ class CastBridge(private val context: Context, messenger: BinaryMessenger) {
                     )
                     "disconnect" -> {
                         disconnect()
+                        result.success(null)
+                    }
+                    "keepAlive" -> {
+                        keepAlive(
+                            call.argument<String>("title") ?: "",
+                            call.argument<String>("device") ?: "Chromecast",
+                        )
+                        result.success(null)
+                    }
+                    "releaseKeepAlive" -> {
+                        CastKeepAliveService.stop(context)
+                        keptAlive = false
                         result.success(null)
                     }
                     else -> result.notImplemented()
@@ -183,6 +204,30 @@ class CastBridge(private val context: Context, messenger: BinaryMessenger) {
         }
     }
 
+    /**
+     * Starts the screen-off service on the first call, and only updates its
+     * notification after that (see [CastKeepAliveService.update]).
+     */
+    private fun keepAlive(title: String, device: String) {
+        if (keptAlive) {
+            CastKeepAliveService.update(context, title, device)
+            return
+        }
+        // Android 13+ hides the notification without this. The service still
+        // runs either way, so a refusal costs only the notification.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 4712)
+        }
+        CastKeepAliveService.onStopRequested = {
+            channel.invokeMethod("stopRequested", null)
+        }
+        CastKeepAliveService.start(context, title, device)
+        keptAlive = true
+    }
+
     private fun disconnect() {
         mediaClient?.unregisterCallback(mediaCallback)
         mediaClient = null
@@ -191,6 +236,8 @@ class CastBridge(private val context: Context, messenger: BinaryMessenger) {
     }
 
     fun dispose() {
+        CastKeepAliveService.onStopRequested = null
+        if (keptAlive) CastKeepAliveService.stop(context)
         stopDiscovery()
         mediaClient?.unregisterCallback(mediaCallback)
         castContext?.sessionManager?.removeSessionManagerListener(
