@@ -13,6 +13,7 @@ import '../../providers/navigation_provider.dart';
 import '../../providers/playlist_provider.dart';
 import '../../providers/tv_provider.dart';
 import '../player/enhanced_video_player.dart';
+import '../widgets/fantasy_zone_settings.dart';
 import '../widgets/tv_text_field.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -102,6 +103,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           _buildSectionHeader('Playback', Icons.play_circle_outline),
           const SizedBox(height: 12),
           _buildPlaybackSettings(),
+
+          const SizedBox(height: 32),
+
+          _buildSectionHeader('Fantasy Zone', Icons.sports_football),
+          const SizedBox(height: 12),
+          const FantasyZoneSettings(),
 
           const SizedBox(height: 32),
 

@@ -29,6 +29,11 @@ class AppConstants {
   static const String settingTvModeOverride = 'tv_mode_override';
   static const String settingVideoOutput = 'video_output';
   static const String settingVideoOutputLearned = 'video_output_learned';
+  static const String settingSleeperUsername = 'sleeper_username';
+  static const String settingSleeperStartersOnly = 'sleeper_starters_only';
+  static const String settingSleeperRoster = 'sleeper_roster';
+  static const String settingSleeperPlayers = 'sleeper_players';
+  static const String settingSleeperPlayersFetchedAt = 'sleeper_players_fetched_at';
 
   // Cache durations
   static const Duration epgCacheDuration = Duration(hours: 12);

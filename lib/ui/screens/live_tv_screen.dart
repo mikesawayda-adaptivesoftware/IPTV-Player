@@ -5,6 +5,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/extensions.dart';
 import '../../data/models/channel.dart';
+import '../../providers/fantasy_zone_provider.dart';
 import '../../providers/playlist_provider.dart';
 import '../player/enhanced_video_player.dart';
 import '../../providers/navigation_provider.dart';
@@ -24,6 +25,10 @@ class LiveTVScreen extends ConsumerStatefulWidget {
 
 class _LiveTVScreenState extends ConsumerState<LiveTVScreen> {
   String _searchQuery = '';
+
+  /// While the Fantasy Zone looks for a game. The first open can take a few
+  /// seconds: it reads rosters from Sleeper before the scoreboard.
+  bool _opening = false;
 
   @override
   Widget build(BuildContext context) {
@@ -114,6 +119,11 @@ class _LiveTVScreenState extends ConsumerState<LiveTVScreen> {
                     ),
                   ],
                 ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.sports_football),
+                onPressed: _opening ? null : _openFantasyZone,
+                tooltip: 'Fantasy Zone',
               ),
               IconButton(
                 icon: const Icon(Icons.refresh),
@@ -246,6 +256,50 @@ class _LiveTVScreenState extends ConsumerState<LiveTVScreen> {
           onMinimize: () {
             Navigator.of(context).pop();
             ref.read(miniPlayerProvider.notifier).play(channel);
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openFantasyZone() async {
+    final zone = ref.read(fantasyZoneProvider.notifier);
+    final messenger = ScaffoldMessenger.of(context);
+    if (!ref.read(fantasyZoneProvider).isLinked) {
+      ref.read(homeTabProvider.notifier).state = HomeTab.settings;
+      messenger.showSnackBar(const SnackBar(
+        content: Text('Link your Sleeper account under Fantasy Zone first.'),
+      ));
+      return;
+    }
+
+    setState(() => _opening = true);
+    messenger.showSnackBar(const SnackBar(
+      content: Text("Finding your players' games..."),
+      duration: Duration(seconds: 2),
+    ));
+    final target = await zone.start();
+    if (!mounted) return;
+    setState(() => _opening = false);
+
+    if (target == null) {
+      final state = ref.read(fantasyZoneProvider);
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(
+        content: Text(state.error ?? state.message ?? 'Nothing to show yet.'),
+      ));
+      return;
+    }
+
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => EnhancedVideoPlayer(
+          channel: target.channel,
+          isLive: true,
+          fantasyZone: true,
+          onMinimize: () {
+            Navigator.of(context).pop();
+            ref.read(miniPlayerProvider.notifier).play(target.channel);
           },
         ),
       ),
