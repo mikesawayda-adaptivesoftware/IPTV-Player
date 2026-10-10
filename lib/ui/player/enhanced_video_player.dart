@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -22,7 +21,10 @@ import '../../data/models/channel.dart';
 import '../../data/services/storage_service.dart';
 import '../../providers/fantasy_zone_provider.dart';
 import '../../providers/playlist_provider.dart';
-import '../screens/cast_test_screen.dart';
+import '../../core/cast/cast_controller.dart';
+import '../../providers/cast_provider.dart';
+import '../screens/cast_screen.dart';
+import '../widgets/mini_player.dart';
 import '../widgets/tv_focusable.dart';
 
 // BufferMode moved to core/player/stream_tuning.dart so the tuning layer can
@@ -240,6 +242,8 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
   }
 
   Future<void> _bootstrap() async {
+    // The provider allows one stream: a cast still running would be a second.
+    await ref.read(castProvider.notifier).stop();
     await _createPlayer();
     _refreshQualityOptions();
     await _openUrl(_streamUrl);
@@ -1402,36 +1406,39 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
   // Diagnostics overlay
   // ==========================================================================
 
-  /// Casting is phone-only: Google's Cast SDK is Android-only here, and a TV
-  /// is a cast target rather than a sender.
-  bool get _canCast =>
-      widget.isLive && !kIsTv && defaultTargetPlatform == TargetPlatform.android;
+  bool get _canCast => widget.isLive && canCast;
 
-  /// Opens the Chromecast test with the provider connection handed over.
+  /// Hands the channel to the Chromecast and leaves the player.
   ///
   /// The provider allows one stream, so the phone's player is stopped - and
   /// the watchdog with it, or it would reconnect the stopped stream - before
-  /// the relay opens its own. The test screen closes the relay before it
-  /// returns, and only then does the phone reopen.
-  Future<void> _openCastTest() async {
-    _watchdog.stop();
-    _quality.stop();
-    _pictureTimer?.cancel();
-    await _player?.stop();
-    if (!mounted) return;
-
-    final last = await Navigator.of(context).push<Channel>(
-      MaterialPageRoute(builder: (_) => CastTestScreen(channel: _currentChannel)),
+  /// the relay opens its own. Inside the expanded mini player, the mini
+  /// player's own Player is closed too. If no Chromecast is picked, nothing
+  /// is stopped and the channel carries on here.
+  Future<void> _startCasting() async {
+    final navigator = Navigator.of(context);
+    final inMiniPlayer = widget.onClose != null;
+    final mini = ref.read(miniPlayerProvider.notifier);
+    final started = await startCasting(
+      context,
+      ref,
+      CastMedia.live(_currentChannel),
+      beforeCasting: () async {
+        _watchdog.stop();
+        _quality.stop();
+        _pictureTimer?.cancel();
+        await _player?.stop();
+        // Unmounts this widget; nothing here may run after it.
+        if (inMiniPlayer) await mini.hide();
+      },
     );
-    if (!mounted) return;
-
-    if (last != null && last.id != _currentChannel.id) {
-      await _switchChannel(last);
+    if (!started) return;
+    final route = MaterialPageRoute(builder: (_) => const CastScreen());
+    if (inMiniPlayer) {
+      navigator.push(route);
     } else {
-      await _openUrl(_currentChannel.streamUrl, userInitiated: true);
+      navigator.pushReplacement(route);
     }
-    _watchdog.start();
-    _quality.start();
   }
 
   void _toggleStats() {
@@ -2258,8 +2265,8 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
               const SizedBox(width: 8),
               IconButton(
                 icon: const Icon(Icons.cast, color: Colors.white),
-                onPressed: _openCastTest,
-                tooltip: 'Chromecast (test)',
+                onPressed: _startCasting,
+                tooltip: 'Cast to a Chromecast',
               ),
             ],
             if (widget.onMinimize != null) ...[

@@ -21,7 +21,43 @@ class ReceiverStatus {
   final String? idleReason;
 
   const ReceiverStatus(this.state, [this.idleReason]);
+
+  bool get isError => state == ReceiverState.idle && idleReason == 'error';
 }
+
+/// The Cast session's state, as the Cast SDK reports it.
+enum CastSessionState {
+  connecting,
+  connected,
+
+  /// Picked back up by the SDK - typically a session left running when the
+  /// app was killed. Whatever fed it is gone.
+  resumed,
+
+  /// The device went quiet (Wi-Fi dropped); the SDK is trying to rejoin.
+  suspended,
+  ended,
+  failed,
+}
+
+class CastSessionEvent {
+  final CastSessionState state;
+  final String? device;
+  final String? reason;
+
+  const CastSessionEvent(this.state, {this.device, this.reason});
+}
+
+/// A film's playback position on the receiver.
+class CastProgress {
+  final Duration position;
+  final Duration duration;
+
+  const CastProgress(this.position, this.duration);
+}
+
+/// A button on the casting notification or the lock screen.
+enum CastCommand { next, previous, play, pause, stop }
 
 /// The Cast session, in Kotlin on top of Google's Cast SDK (`CastBridge.kt`).
 ///
@@ -32,16 +68,29 @@ class CastBridge {
       MethodChannel('com.adaptivesoftware.iptvplayer/cast');
 
   final _devices = StreamController<List<CastDevice>>.broadcast();
-  final _session = StreamController<String>.broadcast();
+  final _session = StreamController<CastSessionEvent>.broadcast();
   final _receiver = StreamController<ReceiverStatus>.broadcast();
+  final _commands = StreamController<CastCommand>.broadcast();
+  final _volume = StreamController<double>.broadcast();
+  final _progress = StreamController<CastProgress>.broadcast();
 
   /// Devices currently visible. Updated as they appear and disappear.
   Stream<List<CastDevice>> get devices => _devices.stream;
 
-  /// `connecting`, `connected`, `ended` or `failed: <reason>`.
-  Stream<String> get session => _session.stream;
+  Stream<CastSessionEvent> get session => _session.stream;
 
   Stream<ReceiverStatus> get receiver => _receiver.stream;
+
+  /// Buttons pressed on the notification or lock screen. The listener owns
+  /// what they do, so a Stop closes the provider connection before anything
+  /// else.
+  Stream<CastCommand> get commands => _commands.stream;
+
+  /// The receiver's volume, 0 to 1, wherever it was changed.
+  Stream<double> get volume => _volume.stream;
+
+  /// Once a second while a film plays.
+  Stream<CastProgress> get progress => _progress.stream;
 
   CastBridge() {
     _channel.setMethodCallHandler(_onCall);
@@ -54,15 +103,61 @@ class CastBridge {
   Future<void> connect(String deviceId) =>
       _channel.invokeMethod('connect', {'id': deviceId});
 
-  /// Hands the receiver an HLS address to play. Throws if it refuses.
-  Future<void> load(String url, {required String title, bool live = true}) =>
-      _channel.invokeMethod('load', {'url': url, 'title': title, 'live': live});
+  /// Hands the receiver an address to play. Throws if it refuses.
+  ///
+  /// Live streams are the relay's HLS; a film is passed through as it is, so
+  /// it carries its own [contentType] and can start at [position].
+  Future<void> load(
+    String url, {
+    required String title,
+    bool live = true,
+    String contentType = 'application/x-mpegURL',
+    Duration position = Duration.zero,
+  }) =>
+      _channel.invokeMethod('load', {
+        'url': url,
+        'title': title,
+        'live': live,
+        'contentType': contentType,
+        'position': position.inMilliseconds,
+      });
+
+  Future<void> play() => _channel.invokeMethod('play');
+
+  Future<void> pause() => _channel.invokeMethod('pause');
+
+  Future<void> seek(Duration position) =>
+      _channel.invokeMethod('seek', {'position': position.inMilliseconds});
+
+  Future<void> setVolume(double level) =>
+      _channel.invokeMethod('setVolume', {'level': level});
 
   /// Stops playback and ends the session, closing the receiver app.
   Future<void> disconnect() => _channel.invokeMethod('disconnect');
 
+  /// Keeps the phone relaying with the screen off, behind a notification that
+  /// doubles as the lock-screen controls. Call again whenever [title] or
+  /// [playing] changes; only the first call starts the service.
+  Future<void> keepAlive({
+    required String title,
+    required String device,
+    required bool live,
+    bool playing = true,
+  }) =>
+      _channel.invokeMethod('keepAlive', {
+        'title': title,
+        'device': device,
+        'live': live,
+        'playing': playing,
+      });
+
+  Future<void> releaseKeepAlive() => _channel.invokeMethod('releaseKeepAlive');
+
   void dispose() {
     _channel.setMethodCallHandler(null);
+    _commands.close();
+    _volume.close();
+    _progress.close();
     _devices.close();
     _session.close();
     _receiver.close();
@@ -82,7 +177,20 @@ class CastBridge {
             .toList();
         _devices.add(list);
       case 'session':
-        _session.add(args as String);
+        _session.add(sessionEventFrom(args as Map));
+      case 'command':
+        final command = CastCommand.values
+            .where((c) => c.name == args)
+            .firstOrNull;
+        if (command != null) _commands.add(command);
+      case 'volume':
+        _volume.add((args as num).toDouble());
+      case 'progress':
+        final map = args as Map;
+        _progress.add(CastProgress(
+          Duration(milliseconds: (map['position'] as num? ?? 0).toInt()),
+          Duration(milliseconds: (map['duration'] as num? ?? 0).toInt()),
+        ));
       case 'receiver':
         final map = args as Map;
         _receiver.add(ReceiverStatus(
@@ -91,6 +199,18 @@ class CastBridge {
         ));
     }
     return null;
+  }
+
+  static CastSessionEvent sessionEventFrom(Map map) {
+    final raw = map['state'] as String? ?? '';
+    final device = map['device'] as String?;
+    if (raw.startsWith('failed')) {
+      final reason = raw.contains(':') ? raw.substring(raw.indexOf(':') + 1).trim() : null;
+      return CastSessionEvent(CastSessionState.failed, device: device, reason: reason);
+    }
+    final state = CastSessionState.values.where((s) => s.name == raw).firstOrNull ??
+        CastSessionState.failed;
+    return CastSessionEvent(state, device: device);
   }
 
   /// MediaStatus.PLAYER_STATE_* values.

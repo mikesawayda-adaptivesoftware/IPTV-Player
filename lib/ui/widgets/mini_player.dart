@@ -12,6 +12,7 @@ import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/models/channel.dart';
 import 'tv_focusable.dart';
+import '../../providers/cast_provider.dart';
 import '../../providers/playlist_provider.dart';
 import '../player/enhanced_video_player.dart';
 
@@ -66,6 +67,8 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
   MiniPlayerNotifier(this._ref) : super(const MiniPlayerState());
 
   Future<void> play(Channel channel) async {
+    // The provider allows one stream: a cast still running would be a second.
+    await _ref.read(castProvider.notifier).stop();
     _watchdog?.dispose();
     _watchdog = null;
     _quality?.dispose();
@@ -195,15 +198,18 @@ class MiniPlayerNotifier extends StateNotifier<MiniPlayerState> {
     state = state.copyWith(isExpanded: false);
   }
 
-  void hide() {
+  /// Completes once the player has let go of its stream, which casting
+  /// waits on.
+  Future<void> hide() async {
     _releaseScreenAwake();
     _watchdog?.dispose();
     _watchdog = null;
     _quality?.dispose();
     _quality = null;
     _url = null;
-    state.player?.dispose();
+    final player = state.player;
     state = const MiniPlayerState();
+    await player?.dispose();
   }
 
   void togglePlayPause() {
