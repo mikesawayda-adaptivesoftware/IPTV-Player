@@ -503,6 +503,27 @@ can serve your traffic and invalidate the run (`netstat -ano | grep LISTENING | 
 to check). And `player.state.buffer` is an **absolute media timestamp**, not remaining
 duration — use `StreamTuning.bufferHealth` rather than dividing it by anything.
 
+### Chromecast relay (test build)
+
+The provider allows **one stream**, so the Chromecast never talks to it. `CastRelay`
+(`lib/core/cast/`) holds the single provider connection on the phone, `TsSegmenter` cuts the
+raw MPEG-TS into HLS chunks at keyframes (no re-encoding: HLS carries TS segments as they are,
+each prefixed with the PAT/PMT), and a local `HttpServer` serves them with CORS to Google's
+Default Media Receiver. The Cast session itself is Kotlin (`CastBridge.kt`) over a
+MethodChannel; devices are found with `MediaRouter` directly because `MediaRouteButton` needs a
+`FragmentActivity`.
+
+Rules that keep it one stream: the live player stops its own `Player` and the watchdog before
+opening the cast screen, and reopens only after the screen has stopped the relay. The relay
+closes the old provider connection and waits `handoverDelay` before dialling the next, because
+the close and the next connect otherwise race on the provider's side; `test/cast_relay_test.dart`
+counts connections from the socket's side to guard this. Every tune gets a new
+`/<token>/<generation>/` path so a stale playlist can never be served.
+
+It is still the phase-1 test: phone-only (`_canCast`), no foreground service (the screen must
+stay open), live TV only. `CastTestScreen` records codecs, time to play and a verdict per
+channel for copying back into the project.
+
 ## Data model gotchas
 
 **M3U channel IDs are not stable.** `M3UParser._parseChannel` assigns `id: _uuid.v4()` on every
