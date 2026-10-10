@@ -24,6 +24,9 @@ class VideoPlayerControls extends StatefulWidget {
   final VoidCallback onToggleFullscreen;
   final VoidCallback onClose;
 
+  /// Shows a Cast button when set.
+  final VoidCallback? onCast;
+
   const VideoPlayerControls({
     super.key,
     required this.player,
@@ -33,6 +36,7 @@ class VideoPlayerControls extends StatefulWidget {
     this.isFullscreen = false,
     required this.onToggleFullscreen,
     required this.onClose,
+    this.onCast,
   });
 
   @override
@@ -420,6 +424,12 @@ class _VideoPlayerControlsState extends State<VideoPlayerControls> {
               ],
             ),
           ),
+          if (widget.onCast != null)
+            IconButton(
+              icon: const Icon(Icons.cast, color: Colors.white),
+              tooltip: 'Cast to a Chromecast',
+              onPressed: widget.onCast,
+            ),
           if (widget.isLive)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),

@@ -527,7 +527,7 @@ can serve your traffic and invalidate the run (`netstat -ano | grep LISTENING | 
 to check). And `player.state.buffer` is an **absolute media timestamp**, not remaining
 duration — use `StreamTuning.bufferHealth` rather than dividing it by anything.
 
-### Chromecast relay (test build)
+### Chromecast
 
 The provider allows **one stream**, so the Chromecast never talks to it. `CastRelay`
 (`lib/core/cast/`) holds the single provider connection on the phone, `TsSegmenter` cuts the
@@ -535,14 +535,30 @@ raw MPEG-TS into HLS chunks at keyframes (no re-encoding: HLS carries TS segment
 each prefixed with the PAT/PMT), and a local `HttpServer` serves them with CORS to Google's
 Default Media Receiver. The Cast session itself is Kotlin (`CastBridge.kt`) over a
 MethodChannel; devices are found with `MediaRouter` directly because `MediaRouteButton` needs a
-`FragmentActivity`.
+`FragmentActivity`. Phone only (`canCast` in `providers/cast_provider.dart`).
 
-Rules that keep it one stream: the live player stops its own `Player` and the watchdog before
-opening the cast screen, and reopens only after the screen has stopped the relay. The relay
-closes the old provider connection and waits `handoverDelay` before dialling the next, because
-the close and the next connect otherwise race on the provider's side; `test/cast_relay_test.dart`
-counts connections from the socket's side to guard this. Every tune gets a new
-`/<token>/<generation>/` path so a stale playlist can never be served.
+**`CastController` (`castProvider`) owns the session and the relay for the whole app**, so a
+cast carries on while the person browses. `CastScreen` is its full controls, `CastBar` sits above
+the phone's bottom bar while anything is cast, and `startCasting` / `castInsteadOfPlaying` /
+`watchOnPhone` in `cast_screen.dart` are the three ways in and out.
+
+Rules that keep it one stream:
+
+- **Every phone player calls `castProvider.notifier.stop()` before it opens** (the live player's
+  `_bootstrap`, the VOD player before its first open, `MiniPlayerNotifier.play`). That is the
+  backstop for any entry point; it is a no-op when nothing is cast.
+- **While casting, a channel or film picked from a list is cast instead** (`castInsteadOfPlaying`
+  at the top of each screen's `_playChannel` / `_playVOD`). A new play path needs the same line.
+- **Starting a cast stops the phone first.** `startCasting` takes a `beforeCasting` callback
+  that the players use to stop their `Player`, watchdog and quality controller (and, in the
+  expanded mini player, the mini player's own `Player`); it runs after a device is picked, so
+  dismissing the picker leaves playback alone.
+- **`stop()` closes the provider connection first**, then the notification, then the session.
+  `test/cast_controller_test.dart` asserts that order.
+- The relay closes the old provider connection and waits `handoverDelay` before dialling the
+  next, because the close and the next connect otherwise race on the provider's side;
+  `test/cast_relay_test.dart` counts connections from the socket's side to guard this. Every
+  tune gets a new `/<token>/<generation>/` path so a stale playlist can never be served.
 
 **Chunks are released in real time, not as they arrive.** On connect a provider sends its
 buffered backlog at line speed (30 Mbit/s was measured on a ~6 Mbit/s channel), and a playlist
@@ -550,12 +566,35 @@ that jumps that far ahead slides its window past the chunk the receiver wants ne
 Media Receiver treats one missing chunk as fatal: the field symptom was "2 playlist, 1 chunks",
 then `idle (error)`, fixed only by changing channel and back. The relay now holds the backlog and
 publishes at most `leadSeconds` ahead of the wall clock; `test/cast_relay_test.dart` replays a
-5x burst against a simulated live client to guard it. The test screen also re-loads the receiver
-on `idle (error)`, which costs no provider connection because the relay keeps running.
+5x burst against a simulated live client to guard it.
 
-It is still the phase-1 test: phone-only (`_canCast`), no foreground service (the screen must
-stay open), live TV only. `CastTestScreen` records codecs, time to play and a verdict per
-channel for copying back into the project.
+**Receiver errors are retried indefinitely, except for codecs.** A retry re-hands the receiver
+the same relay address, which costs no provider connection. `CastController.liveFailure` is the
+exception: MPEG-1/2 video is in no Chromecast's decoder, so the first failure is conclusive;
+HEVC is in some models, so it is only blamed after two failures without ever playing. Either
+way the relay is stopped and the screen offers the phone instead.
+
+**Films are proxied, not re-packaged** (`CastRelay.tuneMovie`): range requests are forwarded
+one at a time, and a seek closes the request before it. Only MP4/M4V/WebM are offered
+(`CastController.movieFormat`); MKV, AVI and the rest get a "can't cast" message before
+anything is stopped, because some Chromecasts open MKV and most do not.
+
+**Screen off: `CastKeepAliveService.kt`.** A `mediaPlayback` foreground service holding a
+partial wake lock and a Wi-Fi lock, because the relay runs in Dart in this process and Android
+otherwise suspends both within a minute. It also owns the notification and a `MediaSession`
+(lock-screen prev/next/stop for live, play/pause/stop for films). The Cast SDK's own
+notification and media session are disabled in `CastOptionsProvider`: its Stop would end the
+session behind the relay's back and its skip buttons act on a queue this app never builds. The
+session plays to a remote `VolumeProvider`, which is what makes the phone's volume keys set the
+TV's volume. Every button goes to Dart as a `CastCommand`, so Dart owns every teardown order.
+`update` re-notifies rather than re-starting the service, because Android 12+ refuses a
+foreground-service start from the background (a lock-screen channel change is exactly that).
+
+**Losing the Chromecast** (switched off, off Wi-Fi) ends the session: the relay stops, and
+`CastState.lost` makes the home screen offer "Watch on phone" in a snackbar. It is offered,
+not done: the phone may be in a pocket. A session the SDK resumes from an earlier run of the
+app is ended, since the relay that fed it died with that run; a session that comes back after
+a suspend is re-handed the stream.
 
 ## Data model gotchas
 
@@ -592,9 +631,11 @@ the README. EPG comes solely from XMLTV, never from the Xtream EPG endpoints.
 - ~80 lint infos, mostly deprecated `withOpacity` and missing `const`. `flutter analyze`
   reports **no errors**; the single warning is a pre-existing unused `_selectedChannelId`
   field in `epg_screen.dart`. Don't add new errors or warnings.
-- `test/` covers the recovery ladder, URL fallback, quality grouping and the user-facing
-  network error text (`core/utils/network_errors.dart`). The only widget
-  test is `tv_text_field_test.dart`; the stock `widget_test.dart` template was removed.
+- `test/` covers the recovery ladder, URL fallback, quality grouping, the user-facing
+  network error text (`core/utils/network_errors.dart`) and the Chromecast relay and
+  controller. The widget tests are `tv_text_field_test.dart`, `tv_navigation_test.dart`,
+  `seek_bar_test.dart` and `cast_screen_test.dart`; the stock `widget_test.dart` template was
+  removed.
 - Android release builds are signed with **debug keys** and `applicationId` is still
   `com.example.iptv_player`. Both are marked TODO in `android/app/build.gradle.kts`.
 - Android ships `usesCleartextTraffic="true"` plus a permissive network security config —
