@@ -15,6 +15,8 @@ class MainActivity : FlutterActivity() {
         private const val CHANNEL = "com.adaptivesoftware.iptvplayer/platform"
     }
 
+    private var castBridge: CastBridge? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
@@ -31,6 +33,14 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        castBridge = CastBridge(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        castBridge?.dispose()
+        castBridge = null
+        super.cleanUpFlutterEngine(flutterEngine)
     }
 
     /**

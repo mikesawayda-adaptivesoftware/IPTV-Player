@@ -82,6 +82,11 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
+        <!-- Chromecast: points the Cast SDK at Google's Default Media Receiver. -->
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="com.adaptivesoftware.iptvplayer.CastOptionsProvider" />
+
         <!--
           Skia rather than Impeller. Video is drawn by mpv into a Flutter
           SurfaceProducer; under Impeller that is composited through Vulkan and

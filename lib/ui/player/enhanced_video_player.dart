@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -21,6 +22,7 @@ import '../../data/models/channel.dart';
 import '../../data/services/storage_service.dart';
 import '../../providers/fantasy_zone_provider.dart';
 import '../../providers/playlist_provider.dart';
+import '../screens/cast_test_screen.dart';
 import '../widgets/tv_focusable.dart';
 
 // BufferMode moved to core/player/stream_tuning.dart so the tuning layer can
@@ -1400,6 +1402,38 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
   // Diagnostics overlay
   // ==========================================================================
 
+  /// Casting is phone-only: Google's Cast SDK is Android-only here, and a TV
+  /// is a cast target rather than a sender.
+  bool get _canCast =>
+      widget.isLive && !kIsTv && defaultTargetPlatform == TargetPlatform.android;
+
+  /// Opens the Chromecast test with the provider connection handed over.
+  ///
+  /// The provider allows one stream, so the phone's player is stopped - and
+  /// the watchdog with it, or it would reconnect the stopped stream - before
+  /// the relay opens its own. The test screen closes the relay before it
+  /// returns, and only then does the phone reopen.
+  Future<void> _openCastTest() async {
+    _watchdog.stop();
+    _quality.stop();
+    _pictureTimer?.cancel();
+    await _player?.stop();
+    if (!mounted) return;
+
+    final last = await Navigator.of(context).push<Channel>(
+      MaterialPageRoute(builder: (_) => CastTestScreen(channel: _currentChannel)),
+    );
+    if (!mounted) return;
+
+    if (last != null && last.id != _currentChannel.id) {
+      await _switchChannel(last);
+    } else {
+      await _openUrl(_currentChannel.streamUrl, userInitiated: true);
+    }
+    _watchdog.start();
+    _quality.start();
+  }
+
   void _toggleStats() {
     setState(() => _showStats = !_showStats);
     _statsTimer?.cancel();
@@ -2220,6 +2254,14 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
               onPressed: _toggleStats,
               tooltip: 'Stream stats (I)',
             ),
+            if (_canCast) ...[
+              const SizedBox(width: 8),
+              IconButton(
+                icon: const Icon(Icons.cast, color: Colors.white),
+                onPressed: _openCastTest,
+                tooltip: 'Chromecast (test)',
+              ),
+            ],
             if (widget.onMinimize != null) ...[
               const SizedBox(width: 8),
               IconButton(
