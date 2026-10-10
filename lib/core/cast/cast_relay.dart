@@ -14,6 +14,9 @@ class RelayStats {
   final double kbpsIn;
   final int segments;
   final double? lastSegmentSeconds;
+
+  /// Seconds of stream received but not yet released to the receiver.
+  final double backlogSeconds;
   final double? keyframeInterval;
   final int forcedCuts;
   final int resyncs;
@@ -22,6 +25,10 @@ class RelayStats {
   final TsStreamInfo info;
   final int playlistRequests;
   final int segmentRequests;
+
+  /// Chunk requests for a chunk the relay no longer had. A receiver gives up
+  /// on the first one, so anything above zero is the cause of a failed cast.
+  final int segmentMisses;
   final DateTime? lastReceiverRequest;
 
   const RelayStats({
@@ -31,6 +38,7 @@ class RelayStats {
     required this.kbpsIn,
     required this.segments,
     required this.lastSegmentSeconds,
+    required this.backlogSeconds,
     required this.keyframeInterval,
     required this.forcedCuts,
     required this.resyncs,
@@ -39,6 +47,7 @@ class RelayStats {
     required this.info,
     required this.playlistRequests,
     required this.segmentRequests,
+    required this.segmentMisses,
     required this.lastReceiverRequest,
   });
 }
@@ -53,6 +62,15 @@ class RelayStats {
 /// Every tune gets a fresh path (`/<token>/<generation>/live.m3u8`) so the
 /// receiver can never be served the previous channel's segments from a cache,
 /// and the token keeps other devices on the network from finding the stream.
+///
+/// Chunks are released to the playlist in real time, not as fast as they
+/// arrive. A provider sends its buffered backlog at line speed on connect -
+/// tens of seconds in a few - and a live playlist that jumps that far ahead
+/// slides its window past the chunk the receiver was about to fetch. The
+/// Default Media Receiver treats that missing chunk as a fatal error, which
+/// was the "loads sometimes, change channel and back" failure in the field.
+/// The backlog waits here instead, so the window moves at the speed the
+/// receiver plays.
 class CastRelay {
   /// Overrides the advertised address; tests use loopback.
   final InternetAddress? host;
@@ -66,11 +84,26 @@ class CastRelay {
   /// otherwise race each other on the provider's side.
   final Duration handoverDelay;
 
+  /// How far ahead of real time chunks may be released. Enough for the
+  /// receiver to start without waiting on the pacing.
+  final double leadSeconds;
+
+  /// Chunks listed in the playlist.
+  final int window;
+
   CastRelay({
     this.host,
     this.stallTimeout = const Duration(seconds: 10),
     this.handoverDelay = const Duration(milliseconds: 300),
+    this.leadSeconds = 6,
+    this.window = 10,
   });
+
+  /// Room for the window plus about a minute of backlog at 2s chunks, capped
+  /// in bytes for high-bitrate channels. The published window is held
+  /// separately, so this cap only ever costs backlog.
+  static TsSegmenter _newSegmenter() =>
+      TsSegmenter(keep: 45, maxBytes: 120 * 1024 * 1024);
 
   HttpServer? _server;
   InternetAddress? _address;
@@ -78,7 +111,17 @@ class CastRelay {
 
   String? _sourceUrl;
   int _generation = 0;
-  TsSegmenter _segmenter = TsSegmenter();
+  TsSegmenter _segmenter = _newSegmenter();
+
+  /// Chunks the receiver can see, oldest first. Held here rather than looked
+  /// up in the segmenter, whose store a large backlog can push them out of.
+  final List<TsSegment> _published = [];
+  int _publishedDiscontinuitySequence = 0;
+  int _nextToPublish = 0;
+  double _publishedSeconds = 0;
+  DateTime? _clockStart;
+  int _targetDuration = 0;
+  Timer? _publisher;
 
   HttpClient? _client;
   StreamSubscription<List<int>>? _subscription;
@@ -90,11 +133,13 @@ class CastRelay {
   /// never exceeds one; the screen shows it so a person can see that too.
   int get providerConnections => _openConnections;
   int _openConnections = 0;
+  DateTime? _lastHangUp;
 
   int _reconnects = 0;
   String? _lastError;
   int _playlistRequests = 0;
   int _segmentRequests = 0;
+  int _segmentMisses = 0;
   DateTime? _lastReceiverRequest;
 
   // Rolling inbound rate.
@@ -108,7 +153,10 @@ class CastRelay {
   Stream<void> get changes => _changes.stream;
 
   RelayStats get stats {
-    final segments = _segmenter.segments;
+    final segments = _published;
+    final backlog = _segmenter.segments
+        .where((s) => s.sequence >= _nextToPublish)
+        .fold<double>(0, (sum, s) => sum + s.duration);
     return RelayStats(
       connected: _connected,
       providerConnections: _openConnections,
@@ -116,6 +164,7 @@ class CastRelay {
       kbpsIn: _kbps,
       segments: segments.length,
       lastSegmentSeconds: segments.isEmpty ? null : segments.last.duration,
+      backlogSeconds: backlog,
       keyframeInterval: _segmenter.keyframeInterval,
       forcedCuts: _segmenter.forcedCuts,
       resyncs: _segmenter.resyncs,
@@ -124,6 +173,7 @@ class CastRelay {
       info: _segmenter.info,
       playlistRequests: _playlistRequests,
       segmentRequests: _segmentRequests,
+      segmentMisses: _segmentMisses,
       lastReceiverRequest: _lastReceiverRequest,
     );
   }
@@ -143,15 +193,33 @@ class CastRelay {
     await start();
     _stopped = false;
     final generation = ++_generation;
-    if (await _closeProvider()) await Future.delayed(handoverDelay);
+    await _closeProvider();
+    // Measured from the last hang-up rather than waited only by the call that
+    // hung up: with rapid presses that call is superseded, and the press that
+    // wins would otherwise dial straight away.
+    final hungUp = _lastHangUp;
+    if (hungUp != null) {
+      final wait = handoverDelay - DateTime.now().difference(hungUp);
+      if (wait > Duration.zero) await Future.delayed(wait);
+    }
     // A quicker channel press arrived during the handover; it owns the relay.
     if (generation != _generation) return playlistUri;
     _sourceUrl = sourceUrl;
-    _segmenter = TsSegmenter();
+    _segmenter = _newSegmenter();
+    _published.clear();
+    _publishedDiscontinuitySequence = 0;
+    _nextToPublish = 0;
+    _publishedSeconds = 0;
+    _clockStart = null;
+    _targetDuration = 0;
+    _publisher?.cancel();
+    _publisher = Timer.periodic(
+        const Duration(milliseconds: 250), (_) => _publish());
     _reconnects = 0;
     _lastError = null;
     _playlistRequests = 0;
     _segmentRequests = 0;
+    _segmentMisses = 0;
     _connect(generation);
     return playlistUri;
   }
@@ -167,6 +235,8 @@ class CastRelay {
   Future<void> stop() async {
     _stopped = true;
     _generation++;
+    _publisher?.cancel();
+    _publisher = null;
     await _closeProvider();
     await _server?.close(force: true);
     _server = null;
@@ -214,6 +284,7 @@ class CastRelay {
       _subscription = response.listen(
         (chunk) {
           _segmenter.add(chunk);
+          _publish();
           _noteBytes(chunk.length);
           _armStallTimer(generation);
         },
@@ -270,8 +341,7 @@ class CastRelay {
     Timer(delay, () => _connect(generation));
   }
 
-  /// Returns whether a connection was open.
-  Future<bool> _closeProvider() async {
+  Future<void> _closeProvider() async {
     _stallTimer?.cancel();
     _stallTimer = null;
     final subscription = _subscription;
@@ -280,13 +350,13 @@ class CastRelay {
     final client = _client;
     if (client != null) await _closeClient(client);
     _connected = false;
-    return client != null;
   }
 
   Future<void> _closeClient(HttpClient client) async {
     if (!identical(client, _client)) return;
     _client = null;
     client.close(force: true);
+    _lastHangUp = DateTime.now();
     _openConnections--;
     _changed();
   }
@@ -301,6 +371,31 @@ class CastRelay {
       _rateStart = now;
       _changed();
     }
+  }
+
+  /// Releases chunks to the playlist no faster than real time, plus
+  /// [leadSeconds]. A provider slower than real time is released as it
+  /// arrives; only a burst is held back.
+  void _publish() {
+    var changed = false;
+    for (final s in _segmenter.segments) {
+      if (s.sequence < _nextToPublish) continue;
+      final now = DateTime.now();
+      final start = _clockStart ??= now;
+      final elapsed = now.difference(start).inMilliseconds / 1000;
+      if (_publishedSeconds >= elapsed + leadSeconds) break;
+
+      _published.add(s);
+      _publishedSeconds += s.duration;
+      _nextToPublish = s.sequence + 1;
+      _targetDuration = math.max(_targetDuration, s.duration.ceil());
+      while (_published.length > window) {
+        if (_published.first.discontinuity) _publishedDiscontinuitySequence++;
+        _published.removeAt(0);
+      }
+      changed = true;
+    }
+    if (changed) _changed();
   }
 
   // ==========================================================================
@@ -338,9 +433,16 @@ class CastRelay {
       }
 
       final match = RegExp(r'^seg(\d+)\.ts$').firstMatch(name);
-      final segment =
-          match == null ? null : _segmenter.segment(int.parse(match.group(1)!));
+      final sequence = match == null ? null : int.parse(match.group(1)!);
+      TsSegment? segment;
+      for (final s in _published) {
+        if (s.sequence == sequence) segment = s;
+      }
       if (segment == null) {
+        if (sequence != null) {
+          _segmentMisses++;
+          _changed();
+        }
         response.statusCode = HttpStatus.notFound;
         return;
       }
@@ -362,15 +464,20 @@ class CastRelay {
   /// playlist reads to a receiver as a stream that has ended.
   Future<void> _servePlaylist(HttpResponse response, int generation) async {
     final deadline = DateTime.now().add(const Duration(seconds: 20));
-    while (_segmenter.segments.length < 2 && DateTime.now().isBefore(deadline)) {
+    while (_published.length < 2 && DateTime.now().isBefore(deadline)) {
       await Future.delayed(const Duration(milliseconds: 200));
       if (generation != _generation) break;
     }
-    if (generation != _generation || _segmenter.segments.isEmpty) {
+    if (generation != _generation || _published.isEmpty) {
       response.statusCode = HttpStatus.serviceUnavailable;
       return;
     }
-    final body = _segmenter.playlist((seq) => 'seg$seq.ts');
+    final body = TsSegmenter.buildPlaylist(
+      _published,
+      targetDuration: _targetDuration,
+      discontinuitySequence: _publishedDiscontinuitySequence,
+      uriFor: (seq) => 'seg$seq.ts',
+    );
     response.headers
       ..set(HttpHeaders.contentTypeHeader, 'application/vnd.apple.mpegurl')
       ..set(HttpHeaders.cacheControlHeader, 'no-cache');

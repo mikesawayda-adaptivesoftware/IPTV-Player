@@ -19,6 +19,12 @@ class _FakeProvider {
   /// Close each connection after this many bytes, to force reconnects.
   int? dropAfterBytes;
 
+  /// Real providers send their buffered backlog as fast as the line allows on
+  /// connect, then fall back to real time. When set, the first [burstSeconds]
+  /// of stream go out at [burstSpeed]x real time and the rest at 1x.
+  double? burstSeconds;
+  double burstSpeed = 5;
+
   Future<void> start() async {
     _server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
     _server.listen(_serve);
@@ -47,13 +53,21 @@ class _FakeProvider {
           'Connection: close\r\n\r\n');
       final fixture = TsFixture();
       var sent = 0;
+      var streamed = 0.0;
       while (open) {
         final chunk = fixture.seconds(0.5);
         socket.add(chunk);
         sent += chunk.length;
+        streamed += 0.5;
         await socket.flush();
         if (dropAfterBytes != null && sent >= dropAfterBytes!) break;
-        await Future.delayed(const Duration(milliseconds: 50));
+        final burst = burstSeconds;
+        final delay = burst == null
+            ? 50
+            : streamed < burst
+                ? (500 / burstSpeed).round()
+                : 500;
+        await Future.delayed(Duration(milliseconds: delay));
       }
     } catch (_) {
       // The relay hung up.
@@ -165,21 +179,64 @@ void main() {
   });
 
   test('reconnects after a drop and marks the break', () async {
-    provider.dropAfterBytes = 400 * 1024;
+    // About four seconds of stream per connection.
+    provider.dropAfterBytes = 100 * 1024;
     final uri = await relay.tune(provider.url('a'));
-    await _get(uri);
 
-    final deadline = DateTime.now().add(const Duration(seconds: 10));
-    while (relay.stats.reconnects < 1 && DateTime.now().isBefore(deadline)) {
-      await Future.delayed(const Duration(milliseconds: 100));
+    // Chunks are released in real time, so the break reaches the playlist
+    // only once the stream before it has been played out.
+    var playlist = '';
+    final deadline = DateTime.now().add(const Duration(seconds: 12));
+    while (!playlist.contains('#EXT-X-DISCONTINUITY') &&
+        DateTime.now().isBefore(deadline)) {
+      playlist = await (await _get(uri)).transform(utf8.decoder).join();
+      await Future.delayed(const Duration(milliseconds: 250));
     }
-    // Let the second connection produce segments.
-    await Future.delayed(const Duration(milliseconds: 1500));
     expect(relay.stats.reconnects, greaterThanOrEqualTo(1));
     expect(provider.maxActive, 1);
-
-    final playlist =
-        await (await _get(uri)).transform(utf8.decoder).join();
     expect(playlist, contains('#EXT-X-DISCONTINUITY'));
+  });
+
+  test('a receiver keeps up through the provider\'s opening burst', () async {
+    // The field failure: the receiver fetched the playlist twice and one chunk,
+    // then errored, because the burst pushed the chunk it wanted next out of
+    // the window before it asked for it.
+    provider.burstSeconds = 30;
+    final uri = await relay.tune(provider.url('a'));
+
+    Future<List<int>> sequences() async {
+      final body = await (await _get(uri)).transform(utf8.decoder).join();
+      return RegExp(r'^seg(\d+)\.ts$', multiLine: true)
+          .allMatches(body)
+          .map((m) => int.parse(m.group(1)!))
+          .toList();
+    }
+
+    // Like a live HLS client: start three from the end, then fetch one chunk
+    // per two seconds of wall clock, reloading the playlist as it goes.
+    final first = await sequences();
+    var next = first[math.max(0, first.length - 3)];
+    final started = DateTime.now();
+    var played = 0.0;
+    final misses = <int>[];
+    while (DateTime.now().difference(started) < const Duration(seconds: 9)) {
+      final listed = await sequences();
+      final elapsed = DateTime.now().difference(started).inMilliseconds / 1000;
+      // Due by the wall clock, and either listed or (the failure) already
+      // scrolled out of the window.
+      final due = elapsed + 2 >= played;
+      final available = listed.contains(next);
+      final gone = listed.isNotEmpty && listed.first > next;
+      if (due && (available || gone)) {
+        final response = await _get(uri.resolve('seg$next.ts'));
+        await response.drain<void>();
+        if (response.statusCode != 200) misses.add(next);
+        next++;
+        played += 2;
+      }
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+    expect(misses, isEmpty);
+    expect(played, greaterThanOrEqualTo(8));
   });
 }

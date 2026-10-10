@@ -38,6 +38,12 @@ class _CastResult {
   String receiver = 'not started';
   String? verdict;
 
+  /// Times the receiver errored and was handed the stream again.
+  int retries = 0;
+
+  /// Chunks the receiver asked for that were already gone.
+  int misses = 0;
+
   _CastResult(this.channel);
 
   String get line {
@@ -45,6 +51,7 @@ class _CastResult {
         ? 'never played'
         : '${(timeToPlaying!.inMilliseconds / 1000).toStringAsFixed(1)}s to play';
     return '$channel | video $video | audio $audio | $t | receiver $receiver'
+        ' | retries $retries | missed chunks $misses'
         ' | ${verdict ?? 'no verdict'}';
   }
 }
@@ -67,6 +74,7 @@ class _CastTestScreenState extends ConsumerState<CastTestScreen> {
   _CastResult? get _current => _results.isEmpty ? null : _results.last;
 
   Timer? _ticker;
+  Timer? _retryTimer;
 
   @override
   void initState() {
@@ -104,6 +112,7 @@ class _CastTestScreenState extends ConsumerState<CastTestScreen> {
         ..video = _stats!.info.videoName
         ..audio = _stats!.info.audioNames;
     }
+    if (current != null) current.misses = _stats!.segmentMisses;
   }
 
   void _onSession(String state) {
@@ -126,9 +135,33 @@ class _CastTestScreenState extends ConsumerState<CastTestScreen> {
         current.timeToPlaying = DateTime.now().difference(start);
       }
     });
+    if (status.state == ReceiverState.idle && status.idleReason == 'error') {
+      _scheduleRetry();
+    }
+  }
+
+  /// Hands the receiver the same relay address again after it errors.
+  ///
+  /// The relay keeps running, so this costs no provider connection - it is
+  /// the change-channel-and-back workaround without the channel change.
+  /// Never gives up while the channel is on screen, like the phone's own
+  /// player; the count is recorded so a test still shows it happened.
+  void _scheduleRetry() {
+    final current = _current;
+    if (current == null || _leaving || _retryTimer?.isActive == true) return;
+    _retryTimer = Timer(const Duration(seconds: 2), () async {
+      if (!mounted || _leaving || !identical(current, _current)) return;
+      setState(() => current.retries++);
+      try {
+        await _bridge.load(_relay.playlistUri.toString(), title: _channel.name);
+      } catch (e) {
+        if (mounted) setState(() => _error = _describe(e));
+      }
+    });
   }
 
   Future<void> _tune(Channel channel) async {
+    _retryTimer?.cancel();
     setState(() {
       _channel = channel;
       _error = null;
@@ -157,6 +190,7 @@ class _CastTestScreenState extends ConsumerState<CastTestScreen> {
   Future<void> _leave() async {
     if (_leaving) return;
     _leaving = true;
+    _retryTimer?.cancel();
     await _relay.stop();
     try {
       await _bridge.disconnect();
@@ -183,6 +217,7 @@ class _CastTestScreenState extends ConsumerState<CastTestScreen> {
   @override
   void dispose() {
     _ticker?.cancel();
+    _retryTimer?.cancel();
     for (final s in _subscriptions) {
       s.cancel();
     }
@@ -338,11 +373,16 @@ class _CastTestScreenState extends ConsumerState<CastTestScreen> {
       _row('Arriving', stats == null ? '-' : '${stats.kbpsIn.round()} kbit/s'),
       _row('Chunks ready', '${stats?.segments ?? 0}'
           '${stats?.lastSegmentSeconds == null ? '' : ', last ${stats!.lastSegmentSeconds!.toStringAsFixed(1)}s'}'),
+      _row('Held back', '${(stats?.backlogSeconds ?? 0).toStringAsFixed(0)}s of stream'),
       _row('Keyframe every', stats?.keyframeInterval == null
           ? '-'
           : '${stats!.keyframeInterval!.toStringAsFixed(1)}s'),
       _row('Chromecast requests',
           '${stats?.playlistRequests ?? 0} playlist, ${stats?.segmentRequests ?? 0} chunks, last $sinceRequest'),
+      if ((stats?.segmentMisses ?? 0) > 0)
+        _row('Missed chunks', '${stats!.segmentMisses}'),
+      if ((current?.retries ?? 0) > 0)
+        _row('Receiver retries', '${current!.retries}'),
       if ((stats?.reconnects ?? 0) > 0)
         _row('Reconnects', '${stats!.reconnects}'),
       if ((stats?.forcedCuts ?? 0) > 0)

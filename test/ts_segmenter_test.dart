@@ -100,6 +100,15 @@ void main() {
       expect(segmenter.segments.first.sequence, 6);
     });
 
+    test('also drops the oldest segments past a byte cap', () {
+      final stream = TsFixture().seconds(21);
+      final uncapped = TsSegmenter(keep: 100)..add(stream);
+      final one = uncapped.segments.first.bytes.length;
+      final capped = TsSegmenter(keep: 100, maxBytes: one * 3)..add(stream);
+      expect(capped.segments.length, 3);
+      expect(capped.segments.last.sequence, uncapped.segments.last.sequence);
+    });
+
     test('flags the first segment after a reconnect as a discontinuity', () {
       final segmenter = TsSegmenter(keep: 4);
       segmenter.add(TsFixture().seconds(5));

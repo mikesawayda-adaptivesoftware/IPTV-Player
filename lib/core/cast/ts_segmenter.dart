@@ -91,11 +91,18 @@ class TsSegmenter {
   /// Segments kept for the playlist; older ones are dropped.
   final int keep;
 
+  /// Also drop the oldest segments once the kept ones exceed this many bytes,
+  /// so a high-bitrate channel cannot hold [keep] segments' worth of memory.
+  final int? maxBytes;
+
   TsSegmenter({
     this.targetSeconds = 2.0,
     this.maxSeconds = 8.0,
     this.keep = 10,
+    this.maxBytes,
   });
+
+  int _keptBytes = 0;
 
   final List<TsSegment> _segments = [];
   List<TsSegment> get segments => List.unmodifiable(_segments);
@@ -174,18 +181,32 @@ class TsSegmenter {
   }
 
   /// The live HLS playlist for the kept segments. [uriFor] names a segment.
-  String playlist(String Function(int sequence) uriFor) {
+  String playlist(String Function(int sequence) uriFor) => buildPlaylist(
+        _segments,
+        targetDuration: _targetDuration,
+        discontinuitySequence: _discontinuitySequence,
+        uriFor: uriFor,
+      );
+
+  /// A live HLS playlist over [segments]. [targetDuration] must never shrink
+  /// between reloads: clients size their reload timer from it.
+  static String buildPlaylist(
+    List<TsSegment> segments, {
+    required int targetDuration,
+    required int discontinuitySequence,
+    required String Function(int sequence) uriFor,
+  }) {
     final b = StringBuffer()
       ..writeln('#EXTM3U')
       ..writeln('#EXT-X-VERSION:3')
-      ..writeln('#EXT-X-TARGETDURATION:$_targetDuration');
-    if (_segments.isNotEmpty) {
-      b.writeln('#EXT-X-MEDIA-SEQUENCE:${_segments.first.sequence}');
+      ..writeln('#EXT-X-TARGETDURATION:$targetDuration');
+    if (segments.isNotEmpty) {
+      b.writeln('#EXT-X-MEDIA-SEQUENCE:${segments.first.sequence}');
     }
-    if (_discontinuitySequence > 0) {
-      b.writeln('#EXT-X-DISCONTINUITY-SEQUENCE:$_discontinuitySequence');
+    if (discontinuitySequence > 0) {
+      b.writeln('#EXT-X-DISCONTINUITY-SEQUENCE:$discontinuitySequence');
     }
-    for (final s in _segments) {
+    for (final s in segments) {
       if (s.discontinuity) b.writeln('#EXT-X-DISCONTINUITY');
       b
         ..writeln('#EXTINF:${s.duration.toStringAsFixed(3)},')
@@ -201,7 +222,7 @@ class TsSegmenter {
     return null;
   }
 
-  /// Never allowed to shrink: HLS clients size their reload timer from it.
+  /// Never allowed to shrink; see [buildPlaylist].
   int _targetDuration = 0;
 
   // ==========================================================================
@@ -312,9 +333,11 @@ class TsSegmenter {
   void _finish(double duration, {required bool forced}) {
     final builder = _current;
     if (builder == null) return;
+    final bytes = builder.takeBytes();
+    _keptBytes += bytes.length;
     _segments.add(TsSegment(
       sequence: _nextSequence++,
-      bytes: builder.takeBytes(),
+      bytes: bytes,
       duration: duration,
       discontinuity: _nextIsDiscontinuity,
       forced: forced,
@@ -322,9 +345,12 @@ class TsSegmenter {
     _nextIsDiscontinuity = false;
     _current = null;
     _targetDuration = math.max(_targetDuration, duration.ceil());
-    while (_segments.length > keep) {
-      if (_segments.first.discontinuity) _discontinuitySequence++;
-      _segments.removeAt(0);
+    final cap = maxBytes;
+    while (_segments.length > keep ||
+        (cap != null && _keptBytes > cap && _segments.length > 1)) {
+      final dropped = _segments.removeAt(0);
+      if (dropped.discontinuity) _discontinuitySequence++;
+      _keptBytes -= dropped.bytes.length;
     }
   }
 
