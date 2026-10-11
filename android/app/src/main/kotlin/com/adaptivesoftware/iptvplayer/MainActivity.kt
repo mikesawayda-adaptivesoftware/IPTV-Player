@@ -34,7 +34,7 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
-        castBridge = CastBridge(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
+        castBridge = CastBridge(this, flutterEngine.dartExecutor.binaryMessenger)
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {

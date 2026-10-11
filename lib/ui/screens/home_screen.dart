@@ -2,13 +2,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/cast/cast_controller.dart';
 import '../../core/platform/tv_platform.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/extensions.dart';
 import '../../data/models/playlist_source.dart';
+import '../../providers/cast_provider.dart';
 import '../../providers/navigation_provider.dart';
 import '../../providers/playlist_provider.dart';
+import '../widgets/cast_bar.dart';
 import '../widgets/mini_player.dart';
+import 'cast_screen.dart';
 import 'live_tv_screen.dart';
 import 'vod_screen.dart';
 import 'epg_screen.dart';
@@ -144,6 +148,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       if (source != null) _loadPlaylist(source);
     });
 
+    // A cast that ended on its own - the Chromecast switched off or dropped
+    // off Wi-Fi - is said here, wherever the person is, with the offer to
+    // carry on on the phone. Not started automatically: the phone may be in
+    // a pocket, and sound suddenly coming out of it would be worse.
+    ref.listen<CastState>(castProvider, (previous, next) {
+      if (previous?.active != true || next.active || next.error == null) return;
+      final lost = next.lost;
+      final position = next.lostPosition;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(next.error!),
+        duration: const Duration(seconds: 10),
+        action: lost == null
+            ? null
+            : SnackBarAction(
+                label: 'Watch on phone',
+                onPressed: () => watchOnPhone(context, ref, lost, position: position),
+              ),
+      ));
+      Future.microtask(() => ref.read(castProvider.notifier).forgetLost());
+    });
+
     final selectedIndex = ref.watch(homeTabProvider).index;
     final isDesktop = context.isDesktop;
     // While the mini player is expanded it draws over this whole Stack, but it
@@ -208,7 +233,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       // Bottom nav for mobile/tablet
       bottomNavigationBar: isDesktop || context.isTv
           ? null
-          : _buildBottomNavBar(selectedIndex),
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CastBar(),
+                _buildBottomNavBar(selectedIndex),
+              ],
+            ),
       // Not on TV: four simultaneous media_kit players will not run on a TV
       // box, and the FAB is a focusable target floating over the video inside
       // the overscan margin.

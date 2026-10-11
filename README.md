@@ -16,6 +16,7 @@ A modern, high-performance cross-platform IPTV player built with Flutter. Suppor
 - **🔗 Flexible Sources** - Add playlists via M3U URLs, local files, or Xtream Codes API.
 - **📁 Smart Categorization** - Automatic grouping of channels and content by categories.
 - **🖥️ Multi-View** - Watch up to 4 channels simultaneously (perfect for sports!).
+- **📡 Chromecast** - Cast live TV and MP4 movies from an Android phone. The phone relays the stream, so the provider still sees a single connection.
 - **⭐ Favorites** - Quick access to your most-watched channels and movies.
 - **🔍 Global Search** - Instant search across all live channels and VOD libraries.
 - **🌓 Adaptive Theme** - Native look and feel on all platforms with dark and light mode support.

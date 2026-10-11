@@ -8,6 +8,8 @@ import '../../data/models/channel.dart';
 import '../../data/models/epg_program.dart';
 import '../../providers/playlist_provider.dart';
 import '../player/enhanced_video_player.dart';
+import '../../core/cast/cast_controller.dart';
+import 'cast_screen.dart';
 import '../../providers/navigation_provider.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/loading_widget.dart';
@@ -555,6 +557,7 @@ class _EPGScreenState extends ConsumerState<EPGScreen> {
   }
 
   void _playChannel(Channel channel) {
+    if (castInsteadOfPlaying(context, ref, CastMedia.live(channel))) return;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => EnhancedVideoPlayer(

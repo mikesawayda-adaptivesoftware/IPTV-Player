@@ -110,6 +110,8 @@ class CastRelay {
   final String _token = _randomToken();
 
   String? _sourceUrl;
+  String? _movieUrl;
+  String _movieExtension = 'mp4';
   int _generation = 0;
   TsSegmenter _segmenter = _newSegmenter();
 
@@ -193,15 +195,8 @@ class CastRelay {
     await start();
     _stopped = false;
     final generation = ++_generation;
-    await _closeProvider();
-    // Measured from the last hang-up rather than waited only by the call that
-    // hung up: with rapid presses that call is superseded, and the press that
-    // wins would otherwise dial straight away.
-    final hungUp = _lastHangUp;
-    if (hungUp != null) {
-      final wait = handoverDelay - DateTime.now().difference(hungUp);
-      if (wait > Duration.zero) await Future.delayed(wait);
-    }
+    _movieUrl = null;
+    await _handOver();
     // A quicker channel press arrived during the handover; it owns the relay.
     if (generation != _generation) return playlistUri;
     _sourceUrl = sourceUrl;
@@ -222,6 +217,57 @@ class CastRelay {
     _segmentMisses = 0;
     _connect(generation);
     return playlistUri;
+  }
+
+  /// Switches the relay to a film and returns the address to hand the
+  /// Chromecast.
+  ///
+  /// Films are proxied rather than re-packaged: MP4 is already something the
+  /// receiver plays, and it needs to seek, which a live playlist cannot do.
+  /// The receiver's range requests are forwarded one at a time - a seek
+  /// abandons the request before it, and the provider connection behind that
+  /// request is closed before the next one opens.
+  Future<Uri> tuneMovie(String sourceUrl, {required String extension}) async {
+    await start();
+    _stopped = false;
+    ++_generation;
+    _publisher?.cancel();
+    _publisher = null;
+    _sourceUrl = null;
+    _movieUrl = sourceUrl;
+    _movieExtension = extension.toLowerCase();
+    _segmenter = _newSegmenter();
+    _published.clear();
+    _reconnects = 0;
+    _lastError = null;
+    _playlistRequests = 0;
+    _segmentRequests = 0;
+    _segmentMisses = 0;
+    await _closeProvider();
+    _changed();
+    return movieUri;
+  }
+
+  Uri get movieUri => Uri(
+        scheme: 'http',
+        host: _address!.address,
+        port: _server!.port,
+        path: '/$_token/$_generation/movie.$_movieExtension',
+      );
+
+  /// Closes the provider connection and waits out [handoverDelay] from the
+  /// last hang-up.
+  ///
+  /// Measured from the last hang-up rather than waited only by the call that
+  /// hung up: with rapid presses that call is superseded, and the press that
+  /// wins would otherwise dial straight away.
+  Future<void> _handOver() async {
+    await _closeProvider();
+    final hungUp = _lastHangUp;
+    if (hungUp != null) {
+      final wait = handoverDelay - DateTime.now().difference(hungUp);
+      if (wait > Duration.zero) await Future.delayed(wait);
+    }
   }
 
   Uri get playlistUri => Uri(
@@ -425,6 +471,11 @@ class CastRelay {
       _lastReceiverRequest = DateTime.now();
 
       final name = parts[2];
+      final movie = _movieUrl;
+      if (movie != null && name == 'movie.$_movieExtension') {
+        await _proxyMovie(request, movie, _generation);
+        return;
+      }
       if (name == 'live.m3u8') {
         _playlistRequests++;
         _changed();
@@ -457,6 +508,60 @@ class CastRelay {
       response.statusCode = HttpStatus.internalServerError;
     } finally {
       await response.close().catchError((_) {});
+    }
+  }
+
+  /// Forwards one receiver request for the film, Range header included.
+  Future<void> _proxyMovie(HttpRequest request, String url, int generation) async {
+    final response = request.response;
+    await _handOver();
+    if (generation != _generation) {
+      response.statusCode = HttpStatus.notFound;
+      return;
+    }
+
+    final client = HttpClient()
+      ..userAgent = StreamTuning.userAgent
+      ..connectionTimeout = const Duration(seconds: 10);
+    _client = client;
+    _openConnections++;
+    _segmentRequests++;
+    _changed();
+    try {
+      final upstream = request.method == 'HEAD'
+          ? await client.headUrl(Uri.parse(url))
+          : await client.getUrl(Uri.parse(url));
+      final range = request.headers.value(HttpHeaders.rangeHeader);
+      if (range != null) upstream.headers.set(HttpHeaders.rangeHeader, range);
+      final reply = await upstream.close();
+
+      response.statusCode = reply.statusCode;
+      for (final name in const [
+        HttpHeaders.contentTypeHeader,
+        HttpHeaders.contentLengthHeader,
+        HttpHeaders.contentRangeHeader,
+        HttpHeaders.acceptRangesHeader,
+      ]) {
+        final value = reply.headers.value(name);
+        if (value != null) response.headers.set(name, value);
+      }
+      if (reply.statusCode >= 400) {
+        _lastError = 'Provider answered HTTP ${reply.statusCode}';
+      } else {
+        _connected = true;
+        _lastError = null;
+      }
+      await response.addStream(reply.map((chunk) {
+        _noteBytes(chunk.length);
+        return chunk;
+      }));
+    } catch (e) {
+      // The receiver hung up (a seek) or the provider did. Either way this
+      // request is over; the receiver asks again for whatever it needs.
+      print('Cast relay: film request ended ${StreamTuning.redactUrl(e.toString())}');
+    } finally {
+      await _closeClient(client);
+      _connected = false;
     }
   }
 

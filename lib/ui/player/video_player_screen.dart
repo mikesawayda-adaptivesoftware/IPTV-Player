@@ -11,6 +11,9 @@ import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
 import 'enhanced_video_player.dart' show autoReconnectProvider, bufferModeProvider;
 import 'video_player_controls.dart';
+import '../../core/cast/cast_controller.dart';
+import '../../providers/cast_provider.dart';
+import '../screens/cast_screen.dart';
 import 'web_video_player.dart';
 
 class VideoPlayerScreen extends ConsumerStatefulWidget {
@@ -20,6 +23,9 @@ class VideoPlayerScreen extends ConsumerStatefulWidget {
   final String? logoUrl;
   final bool isLive;
 
+  /// Where a film starts, when it is carrying on from the Chromecast.
+  final Duration startPosition;
+
   const VideoPlayerScreen({
     super.key,
     required this.streamUrl,
@@ -27,6 +33,7 @@ class VideoPlayerScreen extends ConsumerStatefulWidget {
     this.subtitle,
     this.logoUrl,
     this.isLive = true,
+    this.startPosition = Duration.zero,
   });
 
   @override
@@ -52,6 +59,7 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
   void initState() {
     super.initState();
     _streamUrl = widget.streamUrl;
+    _resumePosition = widget.startPosition;
 
     // Immersive for the whole player lifetime - hide the phone's status bar and
     // nav buttons so video is truly full-screen. Restored in dispose. No-op on
@@ -134,6 +142,9 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
     );
 
     try {
+      // The provider allows one stream: a cast still running would be a
+      // second. After the player exists, since build reads it.
+      await ref.read(castProvider.notifier).stop();
       await _openAndResume(_streamUrl);
       _watchdog!.start();
     } catch (e) {
@@ -180,6 +191,29 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
       _player.dispose();
     }
     super.dispose();
+  }
+
+  /// Hands the film to the Chromecast from where the viewer is, and leaves.
+  Future<void> _startCasting() async {
+    final navigator = Navigator.of(context);
+    final started = await startCasting(
+      context,
+      ref,
+      CastMedia.movie(
+        url: widget.streamUrl,
+        title: widget.title,
+        artwork: widget.logoUrl,
+      ),
+      position: _resumePosition,
+      beforeCasting: () async {
+        _watchdog?.stop();
+        await _player.stop();
+      },
+    );
+    if (!started) return;
+    navigator.pushReplacement(
+      MaterialPageRoute(builder: (_) => const CastScreen()),
+    );
   }
 
   void _toggleFullscreen() {
@@ -295,6 +329,7 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
                   isFullscreen: _isFullscreen,
                   onToggleFullscreen: _toggleFullscreen,
                   onClose: () => Navigator.of(context).pop(),
+                  onCast: !widget.isLive && canCast ? _startCasting : null,
                 ),
             ],
           ),
