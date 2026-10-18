@@ -596,6 +596,25 @@ not done: the phone may be in a pocket. A session the SDK resumes from an earlie
 app is ended, since the relay that fed it died with that run; a session that comes back after
 a suspend is re-handed the stream.
 
+### Picture-in-picture
+
+Leaving the app (Home, Recents) while the live player, the expanded mini player or the
+VOD player is playing floats the video over other apps. Phone only; never on TV, never
+while casting. It is the **same activity drawn small**, so the same `Player` and the same
+provider connection: entering or leaving PiP must never open anything.
+
+- `core/platform/picture_in_picture.dart` is a stack of `PipClaim`s, one per full-screen
+  player; the top one tells `MainActivity` whether leaving should float (playing, not cast)
+  and the video's shape. Android 12+ gets it up front via `setAutoEnterEnabled`; older
+  versions are entered by hand in `onUserLeaveHint`.
+- While `PictureInPicture.active`, the players draw bare video. Overlays are dropped with a
+  spread *after* the `Video` child, so the `Video` widget is never remounted.
+- Closing the window (as opposed to expanding it) sends `dismissed`: the live player closes
+  the channel, freeing the provider slot; VOD pauses. `MainActivity` tells the two apart by
+  whether `onStop` has already run.
+- In PiP the activity is paused, not stopped, so Flutter is `inactive` and the live
+  player's pause-on-`paused` lifecycle rule does not fire. Don't move that rule to `inactive`.
+
 ## Data model gotchas
 
 **M3U channel IDs are not stable.** `M3UParser._parseChannel` assigns `id: _uuid.v4()` on every

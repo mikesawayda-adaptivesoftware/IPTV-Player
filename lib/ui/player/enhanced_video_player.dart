@@ -13,6 +13,7 @@ import '../../core/player/quality_controller.dart';
 import '../../core/player/stream_quality.dart';
 import '../../core/player/stream_tuning.dart';
 import '../../core/player/video_output.dart';
+import '../../core/platform/picture_in_picture.dart';
 import '../../core/platform/tv_platform.dart';
 import '../../core/player/stream_watchdog.dart';
 import '../../core/theme/app_theme.dart';
@@ -162,6 +163,9 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
   /// the output that last worked rather than staying on the last resort.
   bool _rebuildOnNextChannel = false;
 
+  /// This player's say in floating over other apps when the user leaves.
+  late final PipClaim _pip;
+
   @override
   void initState() {
     super.initState();
@@ -189,6 +193,11 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     // fires mid-programme. Nothing else in the app takes a wakelock.
     WidgetsBinding.instance.addObserver(this);
     TvPlatform.acquireKeepScreenOn();
+
+    // Same Player in the floating window - entering or leaving PiP opens
+    // nothing, so it never costs a second provider connection.
+    _pip = PictureInPicture.claim(onDismissed: _onPipDismissed);
+    PictureInPicture.active.addListener(_onPipChanged);
 
     // Constructed before the watchdog because the watchdog's quality callbacks
     // point at it; its own watchdogRef is a closure, so the cycle is fine.
@@ -239,6 +248,46 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
         state == AppLifecycleState.detached) {
       _player?.pause();
     }
+  }
+
+  /// Redraws as bare video in the floating window, and back again.
+  void _onPipChanged() {
+    if (!mounted) return;
+    if (PictureInPicture.active.value) {
+      _hideTimer?.cancel();
+      setState(() => _showControls = false);
+    } else {
+      // The system bars come back with the full-size window.
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      setState(() {});
+    }
+  }
+
+  /// The floating window was closed rather than expanded: that is closing
+  /// the channel, so the provider connection is let go too.
+  void _onPipDismissed() {
+    if (!mounted) return;
+    final onClose = widget.onClose;
+    if (onClose != null) {
+      onClose();
+    } else {
+      Navigator.of(context).maybePop();
+    }
+  }
+
+  /// Floats only while something is actually playing, and never while the
+  /// channel is on a Chromecast.
+  void _updatePip() {
+    final player = _player;
+    final width = player?.state.width;
+    final height = player?.state.height;
+    _pip.update(
+      enabled: (player?.state.playing ?? false) &&
+          !ref.read(castProvider).active,
+      videoSize: width != null && height != null
+          ? Size(width.toDouble(), height.toDouble())
+          : null,
+    );
   }
 
   Future<void> _bootstrap() async {
@@ -353,7 +402,13 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     }
 
     listen(player.stream.playing, (_) {
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      setState(() {});
+      _updatePip();
+    });
+
+    listen(player.stream.width, (_) {
+      if (mounted) _updatePip();
     });
 
     // The mute icon reads player.state.volume, which is a snapshot - setVolume
@@ -584,6 +639,8 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     ]);
     WidgetsBinding.instance.removeObserver(this);
     TvPlatform.releaseKeepScreenOn();
+    PictureInPicture.active.removeListener(_onPipChanged);
+    _pip.release();
     _hideTimer?.cancel();
     _bannerTimer?.cancel();
     _zoneBannerTimer?.cancel();
@@ -964,6 +1021,7 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
     }
 
     final controller = _controller;
+    final inPip = PictureInPicture.active.value;
 
     // canRequestFocus/skipTraversal false is the whole point. This used to be
     // a KeyboardListener with autofocus:true, which made a full-screen node the
@@ -1001,51 +1059,56 @@ class _EnhancedVideoPlayerState extends ConsumerState<EnhancedVideoPlayer>
               else
                 const ColoredBox(color: Colors.black),
 
-              // Video is off, so say so. A black frame with sound still playing
-              // is indistinguishable from the freeze this was meant to fix.
-              if (_quality.current?.videoDisabled ?? false)
-                _buildAudioOnlyPanel(),
+              // The floating window is bare video: nothing else is readable
+              // at that size, and Android keeps taps on it for itself. The
+              // Video above stays where it is so it is not remounted.
+              if (!inPip) ...[
+                // Video is off, so say so. A black frame with sound still playing
+                // is indistinguishable from the freeze this was meant to fix.
+                if (_quality.current?.videoDisabled ?? false)
+                  _buildAudioOnlyPanel(),
 
-              if (_isLoading) _buildLoadingOverlay(),
+                if (_isLoading) _buildLoadingOverlay(),
 
-              if (_isBuffering && !_isLoading) _buildBufferingIndicator(),
+                if (_isBuffering && !_isLoading) _buildBufferingIndicator(),
 
-              // Recovery banner - shown whenever the watchdog is not happy and
-              // we are not already covered by the loading overlay.
-              if (!_watchdogStatus.isHealthy && !_isLoading)
-                _buildWatchdogBanner(),
+                // Recovery banner - shown whenever the watchdog is not happy and
+                // we are not already covered by the loading overlay.
+                if (!_watchdogStatus.isHealthy && !_isLoading)
+                  _buildWatchdogBanner(),
 
-              if (_errorMessage != null) _buildErrorView(),
+                if (_errorMessage != null) _buildErrorView(),
 
-              // Mounted whenever there is no error, not only while visible.
-              // _buildControls already fades itself with AnimatedOpacity, so
-              // the old `_showControls &&` guard meant that animation never ran
-              // in its fade-out direction - and, worse on a remote, the focused
-              // button left the tree entirely when the hide timer fired.
-              // IgnorePointer keeps an invisible control from being clicked;
-              // Select while hidden is swallowed in _handleKeyEvent.
-              if (_errorMessage == null)
-                IgnorePointer(
-                  ignoring: !_showControls,
-                  child: _buildControls(),
-                ),
+                // Mounted whenever there is no error, not only while visible.
+                // _buildControls already fades itself with AnimatedOpacity, so
+                // the old `_showControls &&` guard meant that animation never ran
+                // in its fade-out direction - and, worse on a remote, the focused
+                // button left the tree entirely when the hide timer fired.
+                // IgnorePointer keeps an invisible control from being clicked;
+                // Select while hidden is swallowed in _handleKeyEvent.
+                if (_errorMessage == null)
+                  IgnorePointer(
+                    ignoring: !_showControls,
+                    child: _buildControls(),
+                  ),
 
-              if (_showControls && _errorMessage == null && widget.isLive)
-                _buildBufferHealthIndicator(),
+                if (_showControls && _errorMessage == null && widget.isLive)
+                  _buildBufferHealthIndicator(),
 
-              // Shown whether or not the controls are up: it is the explanation
-              // for why the picture got worse, plus the way back.
-              if (_quality.isDegraded && _errorMessage == null)
-                _buildQualityBadge(),
+                // Shown whether or not the controls are up: it is the explanation
+                // for why the picture got worse, plus the way back.
+                if (_quality.isDegraded && _errorMessage == null)
+                  _buildQualityBadge(),
 
-              // Hidden under the controls, which already name the channel.
-              if (widget.isLive && _errorMessage == null)
-                _buildChannelBanner(),
+                // Hidden under the controls, which already name the channel.
+                if (widget.isLive && _errorMessage == null)
+                  _buildChannelBanner(),
 
-              if (widget.fantasyZone && _errorMessage == null)
-                _buildZoneBanner(),
+                if (widget.fantasyZone && _errorMessage == null)
+                  _buildZoneBanner(),
 
-              if (_showStats) _buildStatsOverlay(),
+                if (_showStats) _buildStatsOverlay(),
+              ],
             ],
           ),
         ),

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../../core/platform/picture_in_picture.dart';
 import '../../core/player/stream_tuning.dart';
 import '../../core/player/video_output.dart';
 import '../../core/player/stream_watchdog.dart';
@@ -55,6 +56,9 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
   /// fixing.
   Duration _resumePosition = Duration.zero;
 
+  /// This screen's say in floating over other apps when the user leaves.
+  PipClaim? _pip;
+
   @override
   void initState() {
     super.initState();
@@ -67,8 +71,35 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
     if (!kIsWeb) {
+      // The floating window is this same Player, so it reopens nothing.
+      // Closing the window pauses the film rather than ending it, so coming
+      // back to the app carries on from the same place.
+      _pip = PictureInPicture.claim(onDismissed: () => _player.pause());
+      PictureInPicture.active.addListener(_onPipChanged);
       _initializePlayer();
     }
+  }
+
+  /// Redraws as bare video in the floating window, and back again.
+  void _onPipChanged() {
+    if (!mounted) return;
+    if (!PictureInPicture.active.value) {
+      // The system bars come back with the full-size window.
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    }
+    setState(() {});
+  }
+
+  /// Floats only while the film is actually playing, never while cast.
+  void _updatePip() {
+    final width = _player.state.width;
+    final height = _player.state.height;
+    _pip?.update(
+      enabled: _player.state.playing && !ref.read(castProvider).active,
+      videoSize: width != null && height != null
+          ? Size(width.toDouble(), height.toDouble())
+          : null,
+    );
   }
 
   Future<void> _initializePlayer() async {
@@ -89,7 +120,13 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
 
     // Listen to player state changes
     _player.stream.playing.listen((playing) {
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      setState(() {});
+      _updatePip();
+    });
+
+    _player.stream.width.listen((_) {
+      if (mounted) _updatePip();
     });
 
     _player.stream.buffering.listen((buffering) {
@@ -186,6 +223,8 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
       DeviceOrientation.landscapeLeft,
       DeviceOrientation.landscapeRight,
     ]);
+    PictureInPicture.active.removeListener(_onPipChanged);
+    _pip?.release();
     _watchdog?.dispose();
     if (!kIsWeb) {
       _player.dispose();
@@ -266,71 +305,74 @@ class _VideoPlayerScreenState extends ConsumerState<VideoPlayerScreen> {
                 ),
               ),
 
-              // Loading indicator
-              if (_isLoading)
-                const Center(
-                  child: CircularProgressIndicator(
-                    color: AppTheme.primaryColor,
+              // The floating window is bare video; see EnhancedVideoPlayer.
+              if (!PictureInPicture.active.value) ...[
+                // Loading indicator
+                if (_isLoading)
+                  const Center(
+                    child: CircularProgressIndicator(
+                      color: AppTheme.primaryColor,
+                    ),
                   ),
-                ),
 
-              // Error message
-              if (_errorMessage != null)
-                Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(
-                        Icons.error_outline,
-                        color: AppTheme.errorColor,
-                        size: 48,
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'Playback Error',
-                        style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                          color: Colors.white,
+                // Error message
+                if (_errorMessage != null)
+                  Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.error_outline,
+                          color: AppTheme.errorColor,
+                          size: 48,
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 32),
-                        child: Text(
-                          _errorMessage!,
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            color: AppTheme.textSecondary,
+                        const SizedBox(height: 16),
+                        Text(
+                          'Playback Error',
+                          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                            color: Colors.white,
                           ),
-                          textAlign: TextAlign.center,
                         ),
-                      ),
-                      const SizedBox(height: 24),
-                      ElevatedButton.icon(
-                        onPressed: () {
-                          setState(() {
-                            _errorMessage = null;
-                            _isLoading = true;
-                          });
-                          _player.open(Media(widget.streamUrl));
-                        },
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('Retry'),
-                      ),
-                    ],
+                        const SizedBox(height: 8),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 32),
+                          child: Text(
+                            _errorMessage!,
+                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              color: AppTheme.textSecondary,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            setState(() {
+                              _errorMessage = null;
+                              _isLoading = true;
+                            });
+                            _player.open(Media(widget.streamUrl));
+                          },
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Retry'),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
 
-              // Custom controls overlay
-              if (_errorMessage == null)
-                VideoPlayerControls(
-                  player: _player,
-                  title: widget.title,
-                  subtitle: widget.subtitle,
-                  isLive: widget.isLive,
-                  isFullscreen: _isFullscreen,
-                  onToggleFullscreen: _toggleFullscreen,
-                  onClose: () => Navigator.of(context).pop(),
-                  onCast: !widget.isLive && canCast ? _startCasting : null,
-                ),
+                // Custom controls overlay
+                if (_errorMessage == null)
+                  VideoPlayerControls(
+                    player: _player,
+                    title: widget.title,
+                    subtitle: widget.subtitle,
+                    isLive: widget.isLive,
+                    isFullscreen: _isFullscreen,
+                    onToggleFullscreen: _toggleFullscreen,
+                    onClose: () => Navigator.of(context).pop(),
+                    onCast: !widget.isLive && canCast ? _startCasting : null,
+                  ),
+              ],
             ],
           ),
       ),
